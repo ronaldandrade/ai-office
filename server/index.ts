@@ -11,6 +11,7 @@ import {
   TerminalWatcher,
   type DetectedTerminalAgent,
 } from './terminalWatcher.ts';
+import { readLatestAgentSummary } from './transcriptReader.ts';
 import type {
   AgentAppearance,
   AgentRecord,
@@ -192,6 +193,17 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/state', (_req, res) => {
   res.json(getSnapshot());
+});
+
+app.get('/api/agents/:id/summary', (req, res) => {
+  const agent = agents.find((a) => a.id === req.params.id);
+  if (!agent) {
+    res.status(404).json({ error: 'Agente não encontrado' });
+    return;
+  }
+  const summary = readLatestAgentSummary(agent);
+  agent.lastSummary = summary;
+  res.json({ summary });
 });
 
 /**

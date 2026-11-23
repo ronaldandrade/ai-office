@@ -35,6 +35,7 @@ ai-office/
 ├── server/
 │   ├── index.ts                 # Servidor HTTP/WebSocket, estado dos agentes e endpoint /api/hook
 │   ├── terminalWatcher.ts       # Varredura de processos locais (ps e /proc/<pid>/cwd)
+│   ├── transcriptReader.ts      # Leitura do último resumo entregue (Claude Code e Antigravity CLI)
 │   ├── cliRegistry.ts           # Detecção de CLIs instalados e montagem de comandos
 │   ├── agentRunner.ts           # Execução de tarefas via spawn com streaming e modo simulação
 │   └── types.ts                 # Tipos compartilhados entre backend e frontend
@@ -65,6 +66,7 @@ ai-office/
 ### Backend (`server/`)
 - **Detecção de CLIs (`cliRegistry.ts`)**: procura executáveis (`claude`, `gemini`, `codex`, `agy`, `aider`) em diretórios padrão (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `/usr/local/bin`, `/usr/bin`) e via `which`. Inclui também os provedores `custom` (comando livre com `{prompt}`) e `demo` (simulação local).
 - **Monitoramento de terminal (`terminalWatcher.ts`)**: executa `ps -eo pid=,ppid=,pcpu=,comm=,args=` a cada 1,5s, ignora PIDs iniciados pelo próprio `AgentRunner` e lê `/proc/<pid>/cwd` para descobrir o projeto atual. Se o processo usar CPU >= 2.2% ou tiver subprocesso ativo (ex.: `bash`, `git`, `npm`), marca o agente como `working` com cooldown de 4,5s; caso contrário, marca como `idle`.
+- **Último resumo entregue (`transcriptReader.ts`)**: ao clicar em um agente (`GET /api/agents/:id/summary`), lê o final do arquivo de transcrição mais recente no disco (`~/.claude/projects/` para Claude Code e `~/.gemini/antigravity-cli/brain/` para Antigravity CLI) ou o histórico web, retornando o último pedido, o resumo final e as ferramentas utilizadas.
 - **Execução pela interface (`agentRunner.ts`)**: ao receber `run_task` via WebSocket, spawna o CLI configurado no `cwd` do agente e envia `stdout`/`stderr` em streaming (`message_chunk`), inferindo a atividade exibida no balão por palavras-chave na saída. Se o CLI escolhido não estiver instalado, cai para o modo simulação.
 - **Webhooks opcionais (`server/index.ts`)**: o endpoint `POST /api/hook` aceita eventos JSON (`provider`, `pid`, `event`, `tool`, `detail`) para sobrescrever temporariamente o status e o texto de atividade de um agente de terminal. Agentes criados manualmente são persistidos em `office-config.json`.
 

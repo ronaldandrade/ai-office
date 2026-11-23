@@ -1,6 +1,7 @@
 export type {
   AgentAppearance,
   AgentRecord,
+  AgentSummary,
   ChatMessage,
   CliProviderInfo,
   OfficeStateSnapshot,

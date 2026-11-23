@@ -35,6 +35,15 @@ export interface ChatMessage {
   toolActivity?: string;
 }
 
+export interface AgentSummary {
+  summary: string;
+  lastPrompt?: string;
+  timestamp: number;
+  source: string;
+  toolsUsed: string[];
+  sessionFile?: string;
+}
+
 export interface AgentRecord {
   id: string;
   name: string;
@@ -48,6 +57,7 @@ export interface AgentRecord {
   appearance: AgentAppearance;
   status: 'idle' | 'working' | 'error';
   currentActivity?: string;
+  lastSummary?: AgentSummary | null;
   messages: ChatMessage[];
 }
 

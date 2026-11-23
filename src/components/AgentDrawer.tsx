@@ -1,6 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Check,
+  Copy,
+  FileText,
   Folder,
+  RefreshCw,
   Send,
   Settings2,
   Square,
@@ -8,7 +12,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { AgentRecord, CliProviderInfo } from '../types/office.ts';
+import type {
+  AgentRecord,
+  AgentSummary,
+  CliProviderInfo,
+} from '../types/office.ts';
 
 interface AgentDrawerProps {
   agent: AgentRecord | null;
@@ -19,6 +27,17 @@ interface AgentDrawerProps {
   onAbortTask: (agentId: string) => void;
   onClearHistory: (agentId: string) => void;
   onEditAgent: (agent: AgentRecord) => void;
+}
+
+function formatTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
 }
 
 export const AgentDrawer: React.FC<AgentDrawerProps> = ({
@@ -32,7 +51,34 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
   onEditAgent,
 }) => {
   const [prompt, setPrompt] = useState('');
+  const [summary, setSummary] = useState<AgentSummary | null>(null);
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [copied, setCopied] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
+
+  const fetchSummary = useCallback(async (agentId: string) => {
+    setLoadingSummary(true);
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/summary`);
+      if (res.ok) {
+        const data = (await res.json()) as { summary: AgentSummary | null };
+        setSummary(data.summary);
+      }
+    } catch {
+      // ignore network glitches
+    } finally {
+      setLoadingSummary(false);
+    }
+  }, []);
+
+  // Fetch latest summary immediately when clicking an agent or when it finishes a task
+  useEffect(() => {
+    if (!agent) {
+      setSummary(null);
+      return;
+    }
+    fetchSummary(agent.id);
+  }, [agent?.id, agent?.status, agent?.messages.length, fetchSummary]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -46,7 +92,7 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
           <h3>Selecione um Agente</h3>
           <p>
             Clique em qualquer personagem andando pelo escritório ou na lista à esquerda
-            para conversar e enviar tarefas reais via CLI.
+            para ver o último resumo entregue e enviar tarefas.
           </p>
         </div>
       </aside>
@@ -59,6 +105,13 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
     if (!trimmed) return;
     onSendTask(agent.id, trimmed, agent.cwd);
     setPrompt('');
+  };
+
+  const handleCopySummary = () => {
+    if (!summary?.summary) return;
+    navigator.clipboard?.writeText(summary.summary);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
   };
 
   return (
@@ -88,7 +141,7 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
           </button>
           <button
             className="icon-btn"
-            title="Limpar histórico"
+            title="Limpar histórico web"
             onClick={() => onClearHistory(agent.id)}
           >
             <Trash2 size={15} />
@@ -121,15 +174,70 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
         <span>{liveActivity || 'No escritório'}</span>
       </div>
 
+      <section className="summary-card">
+        <div className="summary-card-header">
+          <div className="summary-title">
+            <FileText size={13} />
+            <span>Último resumo entregue</span>
+          </div>
+          <div className="summary-actions">
+            {summary && (
+              <button
+                className="icon-mini-btn"
+                title="Copiar resumo"
+                onClick={handleCopySummary}
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+              </button>
+            )}
+            <button
+              className="icon-mini-btn"
+              title="Atualizar resumo"
+              onClick={() => fetchSummary(agent.id)}
+            >
+              <RefreshCw size={12} className={loadingSummary ? 'spin' : ''} />
+            </button>
+          </div>
+        </div>
+
+        {loadingSummary && !summary ? (
+          <p className="summary-empty">Buscando última entrega...</p>
+        ) : summary ? (
+          <>
+            <div className="summary-meta">
+              <span>{summary.source}</span>
+              <span>•</span>
+              <span>{formatTime(summary.timestamp)}</span>
+            </div>
+            {summary.lastPrompt && (
+              <div className="summary-prompt" title={summary.lastPrompt}>
+                <strong>Pedido:</strong> {summary.lastPrompt}
+              </div>
+            )}
+            <div className="summary-body">{summary.summary}</div>
+            {summary.toolsUsed.length > 0 && (
+              <div className="summary-tools">
+                {summary.toolsUsed.map((t) => (
+                  <span key={t} className="tool-chip">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="summary-empty">
+            Nenhum resumo encontrado ainda para este agente. Assim que ele concluir uma
+            tarefa no terminal ou por aqui, o resultado aparece aqui.
+          </p>
+        )}
+      </section>
+
       <div className="chat-messages">
         {agent.messages.length === 0 ? (
           <div className="chat-welcome">
-            <p>
-              <strong>{agent.name}</strong> está no escritório agora ({liveActivity || 'disponível'}).
-            </p>
             <p className="muted">
-              Envie uma tarefa abaixo — ele vai interromper o café/bate-papo, caminhar até
-              a mesa e executar o comando no workspace configurado.
+              Quer enviar uma nova tarefa direto daqui? Digite abaixo ou use um atalho:
             </p>
             <div className="quick-prompts">
               <button
