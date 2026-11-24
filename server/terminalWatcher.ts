@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { ProviderId } from './types.ts';
 
 export interface DetectedTerminalAgent {
   pid: number;
   provider: ProviderId;
-  cwd: string;
+  cwd: string | null;
   projectName: string;
   busy: boolean;
   activityHint?: string;
@@ -64,16 +65,17 @@ function matchProvider(proc: RawProcess): ProviderId | null {
   return null;
 }
 
-function readProcCwd(pid: number): string {
+function readProcCwd(pid: number): string | null {
   try {
     return fs.readlinkSync(`/proc/${pid}/cwd`);
   } catch {
-    return process.cwd();
+    return null;
   }
 }
 
 export class TerminalWatcher {
   private timer: NodeJS.Timeout | null = null;
+  private inFlight = false;
   private busyCooldownUntil = new Map<number, number>();
   private getIgnoredPids: () => Set<number>;
   private onUpdate: (detected: DetectedTerminalAgent[]) => void;
@@ -99,11 +101,21 @@ export class TerminalWatcher {
   }
 
   scan(): void {
+    if (this.inFlight) return;
+    this.inFlight = true;
+
+    const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+    const psArgs =
+      uid >= 0
+        ? ['-u', String(uid), '-o', 'pid=,ppid=,pcpu=,comm=,args=']
+        : ['-eo', 'pid=,ppid=,pcpu=,comm=,args='];
+
     execFile(
       'ps',
-      ['-eo', 'pid=,ppid=,pcpu=,comm=,args='],
+      psArgs,
       { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 },
       (err, stdout) => {
+        this.inFlight = false;
         if (err || !stdout) return;
 
         const ignored = this.getIgnoredPids();
@@ -151,7 +163,7 @@ export class TerminalWatcher {
           if (matchedPids.has(proc.ppid)) continue;
 
           const cwd = readProcCwd(proc.pid);
-          const projectName = path.basename(cwd) || cwd;
+          const projectName = cwd ? path.basename(cwd) || cwd : 'workspace';
           const children = childrenByPpid.get(proc.pid) || [];
           const activeChild = children.find(
             (c) =>

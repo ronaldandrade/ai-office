@@ -46,7 +46,7 @@ export const AddAgentModal: React.FC<AddAgentModalProps> = ({
       'demo'
   );
   const [customCommand, setCustomCommand] = useState(
-    editingAgent?.customCommand || 'echo "Recebi: {prompt}"'
+    editingAgent?.customCommand || 'echo Executando: {prompt}'
   );
   const [cwd, setCwd] = useState(editingAgent?.cwd || defaultCwd);
   const [shirtColor, setShirtColor] = useState(

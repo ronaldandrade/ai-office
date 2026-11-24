@@ -1,5 +1,6 @@
 node_modules/
 dist/
 office-config.json
+.office-session-token
 .env
 *.log

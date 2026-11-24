@@ -3,10 +3,15 @@ import fs from 'node:fs';
 import { buildCliInvocation } from './cliRegistry.ts';
 import type { AgentRecord, CliProviderInfo } from './types.ts';
 
+const MAX_CONCURRENT_TASKS = 4;
+const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_OUTPUT_BYTES = 256 * 1024; // 256 KB per run
+
 interface RunningTask {
   kind: 'process' | 'demo';
   proc?: ChildProcess;
   timers?: NodeJS.Timeout[];
+  timeoutTimer?: NodeJS.Timeout;
   aborted: boolean;
 }
 
@@ -36,6 +41,51 @@ function inferActivityFromOutput(text: string): string | undefined {
   return undefined;
 }
 
+function killProcessTree(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (!proc.pid) return;
+  try {
+    // Negative PID kills the entire process group (detached: true)
+    process.kill(-proc.pid, signal);
+  } catch {
+    try {
+      proc.kill(signal);
+    } catch {
+      // process already exited
+    }
+  }
+}
+
+function buildSafeEnv(providerId: CliProviderInfo['id']): NodeJS.ProcessEnv {
+  if (providerId === 'custom') {
+    const allowKeys = [
+      'PATH',
+      'HOME',
+      'USER',
+      'LANG',
+      'LC_ALL',
+      'TERM',
+      'OLLAMA_HOST',
+      'TMPDIR',
+    ];
+    const filtered: NodeJS.ProcessEnv = {
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
+    };
+    for (const k of allowKeys) {
+      if (process.env[k] !== undefined) filtered[k] = process.env[k];
+    }
+    return filtered;
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    FORCE_COLOR: '0',
+    NO_COLOR: '1',
+  };
+  delete env.OFFICE_AUTH_TOKEN;
+  return env;
+}
+
 export class AgentRunner {
   private running = new Map<string, RunningTask>();
 
@@ -55,11 +105,13 @@ export class AgentRunner {
     const task = this.running.get(agentId);
     if (!task) return false;
     task.aborted = true;
+    if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
     if (task.kind === 'process' && task.proc) {
-      task.proc.kill('SIGTERM');
+      killProcessTree(task.proc, 'SIGTERM');
+      const procRef = task.proc;
       setTimeout(() => {
-        if (task.proc && !task.proc.killed) {
-          task.proc.kill('SIGKILL');
+        if (!procRef.killed && procRef.exitCode === null) {
+          killProcessTree(procRef, 'SIGKILL');
         }
       }, 1500);
     }
@@ -81,17 +133,42 @@ export class AgentRunner {
       this.abort(agent.id);
     }
 
+    if (this.running.size >= MAX_CONCURRENT_TASKS) {
+      callbacks.onChunk(
+        `\n[Limite atingido]: máximo de ${MAX_CONCURRENT_TASKS} tarefas simultâneas em execução.\n`
+      );
+      callbacks.onDone('error');
+      return;
+    }
+
     if (provider.id === 'demo' || (!provider.installed && provider.id !== 'custom')) {
       this.runDemoSimulation(agent, provider, prompt, cwd, callbacks);
       return;
     }
 
-    const safeCwd = fs.existsSync(cwd) ? cwd : process.cwd();
-    const { command, args, shell } = buildCliInvocation(
-      provider,
-      prompt,
-      agent.customCommand
-    );
+    let safeCwd = process.cwd();
+    try {
+      if (fs.statSync(cwd).isDirectory()) {
+        safeCwd = cwd;
+      }
+    } catch {
+      callbacks.onChunk(`\n[Erro]: diretório de trabalho inválido: ${cwd}\n`);
+      callbacks.onDone('error');
+      return;
+    }
+
+    let command: string;
+    let args: string[];
+    try {
+      const inv = buildCliInvocation(provider, prompt, agent.customCommand);
+      command = inv.command;
+      args = inv.args;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      callbacks.onChunk(`\n[Bloqueado por segurança]: ${msg}\n`);
+      callbacks.onDone('error');
+      return;
+    }
 
     callbacks.onActivity(`Executando ${provider.name}...`);
 
@@ -99,12 +176,9 @@ export class AgentRunner {
     try {
       proc = spawn(command, args, {
         cwd: safeCwd,
-        shell,
-        env: {
-          ...process.env,
-          FORCE_COLOR: '0',
-          NO_COLOR: '1',
-        },
+        shell: false,
+        detached: true,
+        env: buildSafeEnv(provider.id),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err) {
@@ -114,14 +188,36 @@ export class AgentRunner {
       return;
     }
 
-    const task: RunningTask = { kind: 'process', proc, aborted: false };
+    const timeoutTimer = setTimeout(() => {
+      if (!this.running.has(agent.id)) return;
+      callbacks.onChunk('\n[Timeout]: execução encerrada após 10 minutos.\n');
+      this.abort(agent.id);
+      callbacks.onDone('error');
+    }, TASK_TIMEOUT_MS);
+
+    const task: RunningTask = {
+      kind: 'process',
+      proc,
+      timeoutTimer,
+      aborted: false,
+    };
     this.running.set(agent.id, task);
 
     let hasOutput = false;
+    let totalBytes = 0;
+    let truncatedNoticeSent = false;
 
     const handleData = (data: Buffer) => {
-      const text = data.toString('utf8');
       hasOutput = true;
+      if (totalBytes >= MAX_OUTPUT_BYTES) {
+        if (!truncatedNoticeSent) {
+          truncatedNoticeSent = true;
+          callbacks.onChunk('\n[Saída truncada: limite de 256 KB atingido]\n');
+        }
+        return;
+      }
+      totalBytes += data.length;
+      const text = data.toString('utf8');
       const inferred = inferActivityFromOutput(text);
       if (inferred) {
         callbacks.onActivity(inferred);
@@ -133,6 +229,7 @@ export class AgentRunner {
     proc.stderr?.on('data', handleData);
 
     proc.on('error', (err) => {
+      if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
       this.running.delete(agent.id);
       if (task.aborted) {
         callbacks.onDone('aborted');
@@ -143,6 +240,7 @@ export class AgentRunner {
     });
 
     proc.on('close', (code) => {
+      if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
       this.running.delete(agent.id);
       if (task.aborted) {
         callbacks.onDone('aborted');

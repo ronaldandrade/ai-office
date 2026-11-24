@@ -1,27 +1,35 @@
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isPathInsideRoot } from './security.ts';
 import type { AgentRecord, AgentSummary } from './types.ts';
 
 const MAX_TAIL_BYTES = 256 * 1024;
 
-function readTailLines(filePath: string): string[] {
+async function readTailLinesSafe(filePath: string, allowedRoot: string): Promise<string[]> {
   try {
-    const stat = fs.statSync(filePath);
-    const size = stat.size;
+    const lstat = await fsp.lstat(filePath);
+    if (lstat.isSymbolicLink() || !lstat.isFile()) return [];
+
+    const realRoot = await fsp.realpath(allowedRoot);
+    const realFile = await fsp.realpath(filePath);
+    if (!isPathInsideRoot(realFile, realRoot)) return [];
+
+    const size = lstat.size;
     if (size === 0) return [];
+
     const start = Math.max(0, size - MAX_TAIL_BYTES);
     const len = size - start;
     const buf = Buffer.alloc(len);
-    const fd = fs.openSync(filePath, 'r');
+    const handle = await fsp.open(realFile, 'r');
     try {
-      fs.readSync(fd, buf, 0, len, start);
+      await handle.read(buf, 0, len, start);
     } finally {
-      fs.closeSync(fd);
+      await handle.close();
     }
+
     const text = buf.toString('utf8');
     const lines = text.split('\n');
-    // Drop possibly truncated first line if we started mid-file
     if (start > 0 && lines.length > 1) lines.shift();
     return lines.filter((l) => l.trim().length > 0);
   } catch {
@@ -33,67 +41,41 @@ function encodeClaudeProjectDir(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-function findLatestJsonlInDir(dirPath: string): string | null {
+async function findLatestJsonlInDir(dirPath: string): Promise<string | null> {
   try {
-    if (!fs.existsSync(dirPath)) return null;
-    const files = fs
-      .readdirSync(dirPath)
-      .filter((f) => f.endsWith('.jsonl'))
-      .map((f) => {
+    const entries = await fsp.readdir(dirPath);
+    const jsonlFiles = entries.filter((f) => f.endsWith('.jsonl'));
+    const stats = await Promise.all(
+      jsonlFiles.map(async (f) => {
         const full = path.join(dirPath, f);
         try {
-          return { full, mtime: fs.statSync(full).mtimeMs };
+          const st = await fsp.lstat(full);
+          if (st.isSymbolicLink() || !st.isFile()) return null;
+          return { full, mtime: st.mtimeMs };
         } catch {
           return null;
         }
       })
+    );
+    const valid = stats
       .filter((x): x is { full: string; mtime: number } => Boolean(x))
       .sort((a, b) => b.mtime - a.mtime);
-    return files[0]?.full ?? null;
+    return valid[0]?.full ?? null;
   } catch {
     return null;
   }
 }
 
-function readClaudeSummary(cwd: string): AgentSummary | null {
+async function readClaudeSummary(cwd: string): Promise<AgentSummary | null> {
   const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-  if (!fs.existsSync(projectsRoot)) return null;
-
   const encoded = encodeClaudeProjectDir(cwd);
-  let targetFile = findLatestJsonlInDir(path.join(projectsRoot, encoded));
+  const projectDir = path.join(projectsRoot, encoded);
 
-  // Fallback: newest jsonl across any project dir if exact cwd folder doesn't exist
-  if (!targetFile) {
-    try {
-      const dirs = fs
-        .readdirSync(projectsRoot)
-        .map((d) => {
-          const full = path.join(projectsRoot, d);
-          try {
-            const st = fs.statSync(full);
-            return st.isDirectory() ? { full, mtime: st.mtimeMs } : null;
-          } catch {
-            return null;
-          }
-        })
-        .filter((x): x is { full: string; mtime: number } => Boolean(x))
-        .sort((a, b) => b.mtime - a.mtime);
-
-      for (const d of dirs.slice(0, 5)) {
-        const found = findLatestJsonlInDir(d.full);
-        if (found) {
-          targetFile = found;
-          break;
-        }
-      }
-    } catch {
-      return null;
-    }
-  }
-
+  // Only read transcripts belonging strictly to the agent's own workspace directory
+  const targetFile = await findLatestJsonlInDir(projectDir);
   if (!targetFile) return null;
 
-  const lines = readTailLines(targetFile);
+  const lines = await readTailLinesSafe(targetFile, projectsRoot);
   let summary = '';
   let timestamp = 0;
   let lastPrompt: string | undefined;
@@ -151,30 +133,34 @@ function readClaudeSummary(cwd: string): AgentSummary | null {
   };
 }
 
-function readAntigravitySummary(): AgentSummary | null {
+async function readAntigravitySummary(): Promise<AgentSummary | null> {
   const brainRoot = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain');
-  if (!fs.existsSync(brainRoot)) return null;
-
-  let candidates: Array<{ file: string; mtime: number }> = [];
+  let ids: string[];
   try {
-    for (const id of fs.readdirSync(brainRoot)) {
-      const file = path.join(brainRoot, id, '.system_generated', 'logs', 'transcript.jsonl');
-      if (fs.existsSync(file)) {
-        try {
-          candidates.push({ file, mtime: fs.statSync(file).mtimeMs });
-        } catch {
-          // ignore
-        }
-      }
-    }
+    ids = await fsp.readdir(brainRoot);
   } catch {
     return null;
   }
 
-  candidates.sort((a, b) => b.mtime - a.mtime);
+  const candidateStats = await Promise.all(
+    ids.map(async (id) => {
+      const file = path.join(brainRoot, id, '.system_generated', 'logs', 'transcript.jsonl');
+      try {
+        const st = await fsp.lstat(file);
+        if (st.isSymbolicLink() || !st.isFile()) return null;
+        return { file, mtime: st.mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const candidates = candidateStats
+    .filter((x): x is { file: string; mtime: number } => Boolean(x))
+    .sort((a, b) => b.mtime - a.mtime);
 
   for (const cand of candidates.slice(0, 6)) {
-    const lines = readTailLines(cand.file);
+    const lines = await readTailLinesSafe(cand.file, brainRoot);
     let summary = '';
     let timestamp = 0;
     let lastPrompt: string | undefined;
@@ -229,8 +215,9 @@ function readAntigravitySummary(): AgentSummary | null {
   return null;
 }
 
-export function readLatestAgentSummary(agent: AgentRecord): AgentSummary | null {
-  // Check web chat messages first if any completed response exists
+export async function readLatestAgentSummary(
+  agent: AgentRecord
+): Promise<AgentSummary | null> {
   let webSummary: AgentSummary | null = null;
   for (let i = agent.messages.length - 1; i >= 0; i--) {
     const msg = agent.messages[i];
@@ -252,9 +239,9 @@ export function readLatestAgentSummary(agent: AgentRecord): AgentSummary | null 
 
   let diskSummary: AgentSummary | null = null;
   if (agent.provider === 'claude') {
-    diskSummary = readClaudeSummary(agent.cwd);
+    diskSummary = await readClaudeSummary(agent.cwd);
   } else if (agent.provider === 'agy') {
-    diskSummary = readAntigravitySummary();
+    diskSummary = await readAntigravitySummary();
   }
 
   if (webSummary && diskSummary) {

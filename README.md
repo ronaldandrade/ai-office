@@ -33,11 +33,12 @@ ai-office/
 ├── docs/
 │   └── office-preview.jpg       # Imagem ilustrativa do escritório
 ├── server/
-│   ├── index.ts                 # Servidor HTTP/WebSocket, estado dos agentes e endpoint /api/hook
-│   ├── terminalWatcher.ts       # Varredura de processos locais (ps e /proc/<pid>/cwd)
-│   ├── transcriptReader.ts      # Leitura do último resumo entregue (Claude Code e Antigravity CLI)
-│   ├── cliRegistry.ts           # Detecção de CLIs instalados e montagem de comandos
-│   ├── agentRunner.ts           # Execução de tarefas via spawn com streaming e modo simulação
+│   ├── index.ts                 # Servidor HTTP/WebSocket (127.0.0.1), estado dos agentes e endpoint /api/hook
+│   ├── security.ts              # Autenticação por token local, allowlist de origens, validação de payloads e cwd
+│   ├── terminalWatcher.ts       # Varredura de processos locais do usuário (ps -u e /proc/<pid>/cwd)
+│   ├── transcriptReader.ts      # Leitura assíncrona do último resumo entregue (Claude Code e Antigravity CLI)
+│   ├── cliRegistry.ts           # Detecção de CLIs instalados e montagem segura de comandos (sem shell)
+│   ├── agentRunner.ts           # Execução de tarefas via spawn (shell: false), timeout, streaming e modo simulação
 │   └── types.ts                 # Tipos compartilhados entre backend e frontend
 ├── src/
 │   ├── engine/
@@ -52,7 +53,9 @@ ai-office/
 │   │   ├── AgentDrawer.tsx      # Painel lateral de chat, saída em streaming e botão para abortar tarefa
 │   │   └── AddAgentModal.tsx    # Modal para criar ou editar agente (CLI, comando customizado, workspace e aparência)
 │   ├── hooks/
-│   │   └── useOfficeSocket.ts   # Cliente WebSocket com reconexão automática e sincronização de estado
+│   │   └── useOfficeSocket.ts   # Cliente WebSocket autenticado com reconexão automática e sincronização de estado
+│   ├── lib/
+│   │   └── sessionAuth.ts       # Bootstrap do token de sessão local (/api/session) e validação de cores hex
 │   ├── types/
 │   │   └── office.ts            # Tipos do motor de simulação e reexportação dos tipos do servidor
 │   ├── App.tsx                  # Layout principal conectando socket, canvas, sidebar e drawer
@@ -64,11 +67,12 @@ ai-office/
 ## Como funciona
 
 ### Backend (`server/`)
-- **Detecção de CLIs (`cliRegistry.ts`)**: procura executáveis (`claude`, `gemini`, `codex`, `agy`, `aider`) em diretórios padrão (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `/usr/local/bin`, `/usr/bin`) e via `which`. Inclui também os provedores `custom` (comando livre com `{prompt}`) e `demo` (simulação local).
-- **Monitoramento de terminal (`terminalWatcher.ts`)**: executa `ps -eo pid=,ppid=,pcpu=,comm=,args=` a cada 1,5s, ignora PIDs iniciados pelo próprio `AgentRunner` e lê `/proc/<pid>/cwd` para descobrir o projeto atual. Se o processo usar CPU >= 2.2% ou tiver subprocesso ativo (ex.: `bash`, `git`, `npm`), marca o agente como `working` com cooldown de 4,5s; caso contrário, marca como `idle`.
-- **Último resumo entregue (`transcriptReader.ts`)**: ao clicar em um agente (`GET /api/agents/:id/summary`), lê o final do arquivo de transcrição mais recente no disco (`~/.claude/projects/` para Claude Code e `~/.gemini/antigravity-cli/brain/` para Antigravity CLI) ou o histórico web, retornando o último pedido, o resumo final e as ferramentas utilizadas.
-- **Execução pela interface (`agentRunner.ts`)**: ao receber `run_task` via WebSocket, spawna o CLI configurado no `cwd` do agente e envia `stdout`/`stderr` em streaming (`message_chunk`), inferindo a atividade exibida no balão por palavras-chave na saída. Se o CLI escolhido não estiver instalado, cai para o modo simulação.
-- **Webhooks opcionais (`server/index.ts`)**: o endpoint `POST /api/hook` aceita eventos JSON (`provider`, `pid`, `event`, `tool`, `detail`) para sobrescrever temporariamente o status e o texto de atividade de um agente de terminal. Agentes criados manualmente são persistidos em `office-config.json`.
+- **Segurança local (`security.ts`, `server/index.ts`)**: o servidor escuta apenas em `127.0.0.1`, restringe CORS e handshake WebSocket (`Origin`) às origens locais e exige um token aleatório de sessão (salvo com permissão `0600` em `.office-session-token` e entregue à UI via `GET /api/session` com cookie `HttpOnly; SameSite=Strict`). Payloads HTTP/WS e caminhos de workspace (`cwd`) passam por validação estrita em runtime.
+- **Detecção de CLIs (`cliRegistry.ts`)**: procura executáveis (`claude`, `gemini`, `codex`, `agy`, `aider`) em diretórios padrão (`/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`) e via `which`. Inclui também os provedores `custom` (tokenizado em `argv` com `shell: false`, bloqueando shells e restringindo a binários permitidos, salvo se `ENABLE_CUSTOM_CLI=1`) e `demo` (simulação local).
+- **Monitoramento de terminal (`terminalWatcher.ts`)**: executa `ps -u <uid> -o pid=,ppid=,pcpu=,comm=,args=` a cada 1,5s sem sobreposição, ignora PIDs iniciados pelo próprio `AgentRunner` e lê `/proc/<pid>/cwd` para descobrir o projeto atual. Se o processo usar CPU >= 2.2% ou tiver subprocesso ativo (ex.: `bash`, `git`, `npm`), marca o agente como `working` com cooldown de 4,5s; caso contrário, marca como `idle`.
+- **Último resumo entregue (`transcriptReader.ts`)**: ao clicar em um agente (`GET /api/agents/:id/summary`), lê de forma assíncrona o final do arquivo de transcrição mais recente do próprio workspace (`~/.claude/projects/` para Claude Code e `~/.gemini/antigravity-cli/brain/` para Antigravity CLI), ignorando symlinks, ou usa o histórico web.
+- **Execução pela interface (`agentRunner.ts`)**: ao receber `run_task` via WebSocket, spawna o CLI configurado com `shell: false`, grupo de processo isolado (`detached: true`), timeout de 10 minutos e limite de 256 KB de saída, enviando `stdout`/`stderr` em streaming (`message_chunk`). Se o CLI escolhido não estiver instalado, cai para o modo simulação.
+- **Webhooks opcionais (`server/index.ts`)**: o endpoint autenticado `POST /api/hook` (via header `X-Office-Token`) aceita eventos JSON validados (`provider`, `pid`, `event`, `tool`, `detail`) para sobrescrever temporariamente o status e o texto de atividade de um agente de terminal. Agentes criados manualmente são persistidos em `office-config.json` (`0600`).
 
 ### Frontend (`src/`)
 - **Mapa e movimentação (`officeMap.ts`, `pathfinding.ts`)**: define um grid de `24x15` tiles de `32px` com 6 mesas (`DESK_SLOTS`), móveis sólidos e pontos de interesse (`POINTS_OF_INTEREST`). O `findPath` calcula rotas A* evitando células bloqueadas.

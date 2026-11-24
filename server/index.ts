@@ -1,5 +1,5 @@
 import cors from 'cors';
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -7,6 +7,21 @@ import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { AgentRunner } from './agentRunner.ts';
 import { detectProviders } from './cliRegistry.ts';
+import {
+  ALLOWED_ORIGINS,
+  extractRequestToken,
+  initSessionToken,
+  isAllowedOrigin,
+  isSameSiteBootstrapRequest,
+  parseCreateAgentPayload,
+  parseHookPayload,
+  parseUpdateAgentPatch,
+  safeCompareToken,
+  sanitizeAppearance,
+  sanitizeString,
+  validateProviderId,
+  validateWorkspacePath,
+} from './security.ts';
 import {
   TerminalWatcher,
   type DetectedTerminalAgent,
@@ -23,7 +38,16 @@ import type {
 } from './types.ts';
 
 const PORT = Number(process.env.PORT || 3001);
+const HOST = process.env.HOST || '127.0.0.1';
 const CONFIG_PATH = path.resolve(process.cwd(), 'office-config.json');
+const TOKEN_PATH = path.resolve(process.cwd(), '.office-session-token');
+
+const MAX_MANUAL_AGENTS = 12;
+const MAX_MESSAGES_PER_AGENT = 100;
+const MAX_PROMPT_LENGTH = 16_000;
+const MAX_HOOK_OVERRIDES = 100;
+
+const SESSION_TOKEN = initSessionToken(TOKEN_PATH);
 
 interface PersistedConfig {
   version?: number;
@@ -123,32 +147,69 @@ if (!fs.existsSync(defaultCwd)) {
 }
 
 let agents: AgentRecord[] = [];
-// Optional webhook overrides (e.g., Claude Code hooks) per provider or pid
 const hookOverrides = new Map<
   string,
   { status: 'working' | 'idle'; activity?: string; expiresAt: number }
 >();
 
+function pruneHookOverrides(now: number): void {
+  for (const [k, v] of hookOverrides.entries()) {
+    if (v.expiresAt <= now) {
+      hookOverrides.delete(k);
+    }
+  }
+  while (hookOverrides.size >= MAX_HOOK_OVERRIDES) {
+    const oldestKey = hookOverrides.keys().next().value;
+    if (oldestKey === undefined) break;
+    hookOverrides.delete(oldestKey);
+  }
+}
+
 function loadState(): void {
   if (fs.existsSync(CONFIG_PATH)) {
     try {
+      fs.chmodSync(CONFIG_PATH, 0o600);
+    } catch {
+      // ignore chmod errors on unsupported fs
+    }
+    try {
       const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) as PersistedConfig;
-      if (raw.defaultCwd) defaultCwd = raw.defaultCwd;
+      const validDefault = validateWorkspacePath(raw.defaultCwd, defaultCwd);
+      if (validDefault) defaultCwd = validDefault;
+
       if (raw.version === 2 && Array.isArray(raw.manualAgents)) {
-        agents = raw.manualAgents.map((a, idx) => ({
-          ...a,
-          origin: 'manual',
-          deskIndex: typeof a.deskIndex === 'number' ? a.deskIndex : idx % 6,
-          status: 'idle',
-          messages: [],
-        }));
+        agents = raw.manualAgents
+          .slice(0, MAX_MANUAL_AGENTS)
+          .map((a, idx): AgentRecord | null => {
+            const prov = validateProviderId(a.provider);
+            const name = sanitizeString(a.name, 40);
+            const cwd = validateWorkspacePath(a.cwd, defaultCwd);
+            if (!prov || !name || !cwd) return null;
+            return {
+              id: sanitizeString(a.id, 64) || `agent-loaded-${idx}`,
+              name,
+              roleTitle: sanitizeString(a.roleTitle, 60, 'Agente IA') || 'Agente IA',
+              provider: prov,
+              origin: 'manual',
+              customCommand:
+                prov === 'custom' ? sanitizeString(a.customCommand, 300) : undefined,
+              cwd,
+              deskIndex:
+                typeof a.deskIndex === 'number' && Number.isInteger(a.deskIndex)
+                  ? ((a.deskIndex % 6) + 6) % 6
+                  : idx % 6,
+              appearance: sanitizeAppearance(a.appearance),
+              status: 'idle',
+              messages: [],
+            };
+          })
+          .filter((x): x is AgentRecord => Boolean(x));
         return;
       }
     } catch {
       // ignore corrupted config
     }
   }
-  // Start clean: terminal agents will populate automatically via TerminalWatcher
   agents = [];
   saveState();
 }
@@ -165,12 +226,17 @@ function saveState(): void {
           currentActivity: _c,
           messages: _m,
           terminalPid: _p,
+          lastSummary: _l,
           ...rest
         }) => rest
       ),
   };
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(payload, null, 2), 'utf8');
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(payload, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    fs.chmodSync(CONFIG_PATH, 0o600);
   } catch (err) {
     console.error('Failed to persist office-config.json:', err);
   }
@@ -179,72 +245,124 @@ function saveState(): void {
 loadState();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
 
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    providersCount: providers.length,
-    agentsCount: agents.length,
-    terminalAgents: agents.filter((a) => a.origin === 'terminal').length,
-  });
+// Defensive HTTP security headers
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; frame-ancestors 'none'"
+  );
+  next();
 });
 
-app.get('/api/state', (_req, res) => {
+// Strict origin-based CORS
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !isAllowedOrigin(origin)) {
+    res.status(403).json({ error: 'Origem não permitida' });
+    return;
+  }
+  next();
+});
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: '64kb' }));
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  const token = extractRequestToken(req);
+  if (!safeCompareToken(token, SESSION_TOKEN)) {
+    res.status(401).json({ error: 'Não autorizado' });
+    return;
+  }
+  next();
+}
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
+// Local same-origin session bootstrap for the web UI
+app.get('/api/session', (req, res) => {
+  if (!isSameSiteBootstrapRequest(req)) {
+    res.status(403).json({ error: 'Origem não permitida' });
+    return;
+  }
+  res.setHeader(
+    'Set-Cookie',
+    `office_token=${encodeURIComponent(SESSION_TOKEN)}; HttpOnly; SameSite=Strict; Path=/`
+  );
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ token: SESSION_TOKEN });
+});
+
+app.get('/api/state', requireAuth, (_req, res) => {
   res.json(getSnapshot());
 });
 
-app.get('/api/agents/:id/summary', (req, res) => {
+app.get('/api/agents/:id/summary', requireAuth, async (req, res) => {
   const agent = agents.find((a) => a.id === req.params.id);
   if (!agent) {
     res.status(404).json({ error: 'Agente não encontrado' });
     return;
   }
-  const summary = readLatestAgentSummary(agent);
+  const summary = await readLatestAgentSummary(agent);
   agent.lastSummary = summary;
   res.json({ summary });
 });
 
 /**
- * Optional webhook endpoint for CLI hooks (e.g. Claude Code PreToolUse / PostToolUse / Stop)
- * Example: curl -X POST http://localhost:3001/api/hook -H 'Content-Type: application/json' \
- *   -d '{"provider":"claude","event":"PreToolUse","tool":"Edit","detail":"App.tsx"}'
+ * Authenticated webhook endpoint for CLI hooks (e.g. Claude Code PreToolUse / PostToolUse / Stop)
+ * Header: X-Office-Token: <token from .office-session-token>
  */
-app.post('/api/hook', (req, res) => {
-  const body = (req.body || {}) as {
-    provider?: ProviderId;
-    pid?: number;
-    event?: string;
-    tool?: string;
-    detail?: string;
-  };
-  const provider = body.provider || 'claude';
-  const key = body.pid ? `pid:${body.pid}` : `provider:${provider}`;
-  const event = (body.event || '').toLowerCase();
+app.post('/api/hook', requireAuth, (req, res) => {
+  const parsed = parseHookPayload(req.body);
+  if (!parsed) {
+    res.status(400).json({ error: 'Payload inválido' });
+    return;
+  }
 
-  if (event === 'stop' || event === 'idle' || event === 'notification') {
+  const now = Date.now();
+  pruneHookOverrides(now);
+
+  const key = parsed.pid ? `pid:${parsed.pid}` : `provider:${parsed.provider}`;
+
+  if (parsed.event === 'stop' || parsed.event === 'idle' || parsed.event === 'notification') {
     hookOverrides.set(key, {
       status: 'idle',
-      expiresAt: Date.now() + 8000,
+      expiresAt: now + 8000,
     });
   } else {
-    const label = body.tool
-      ? `${body.tool}${body.detail ? `: ${body.detail}` : '...'}`
+    const label = parsed.tool
+      ? `${parsed.tool}${parsed.detail ? `: ${parsed.detail}` : '...'}`
       : 'Trabalhando no terminal...';
     hookOverrides.set(key, {
       status: 'working',
       activity: label,
-      expiresAt: Date.now() + 15000,
+      expiresAt: now + 15000,
     });
   }
 
-  // Trigger an immediate status refresh on matching terminal agents
   for (const agent of agents) {
     if (agent.origin !== 'terminal') continue;
     if (
-      (body.pid && agent.terminalPid === body.pid) ||
-      (!body.pid && agent.provider === provider)
+      (parsed.pid && agent.terminalPid === parsed.pid) ||
+      (!parsed.pid && agent.provider === parsed.provider)
     ) {
       const ov = hookOverrides.get(key)!;
       agent.status = ov.status;
@@ -261,8 +379,33 @@ app.post('/api/hook', (req, res) => {
   res.json({ ok: true });
 });
 
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const isSyntax = err instanceof SyntaxError;
+  res.status(isSyntax ? 400 : 500).json({
+    error: isSyntax ? 'JSON inválido' : 'Erro interno do servidor',
+  });
+});
+
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  maxPayload: 64 * 1024,
+  verifyClient: (info, done) => {
+    const originOk = isAllowedOrigin(info.origin);
+    if (!originOk) {
+      done(false, 403, 'Forbidden Origin');
+      return;
+    }
+    const token = extractRequestToken(info.req);
+    if (!safeCompareToken(token, SESSION_TOKEN)) {
+      done(false, 401, 'Unauthorized');
+      return;
+    }
+    done(true);
+  },
+});
+
 const runner = new AgentRunner();
 
 function getSnapshot(): OfficeStateSnapshot {
@@ -296,12 +439,20 @@ function findNextFreeDesk(): number {
   return agents.length % 6;
 }
 
+function appendMessageBounded(agent: AgentRecord, msg: ChatMessage): void {
+  agent.messages.push(msg);
+  if (agent.messages.length > MAX_MESSAGES_PER_AGENT) {
+    agent.messages.splice(0, agent.messages.length - MAX_MESSAGES_PER_AGENT);
+  }
+}
+
 function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
   const now = Date.now();
+  pruneHookOverrides(now);
+
   let structureChanged = false;
   const livePids = new Set(detected.map((d) => d.pid));
 
-  // Remove terminal agents whose CLI process exited (unless running a web task)
   const beforeLen = agents.length;
   agents = agents.filter((a) => {
     if (a.origin !== 'terminal') return true;
@@ -312,11 +463,12 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
     structureChanged = true;
   }
 
-  // Add or update detected terminal processes
   for (const proc of detected) {
     let agent = agents.find(
       (a) => a.origin === 'terminal' && a.terminalPid === proc.pid
     );
+
+    const resolvedCwd = proc.cwd || agent?.cwd || defaultCwd;
 
     if (!agent) {
       const persona = PROVIDER_PERSONAS[proc.provider] || PROVIDER_PERSONAS.custom;
@@ -335,7 +487,7 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
         provider: proc.provider,
         origin: 'terminal',
         terminalPid: proc.pid,
-        cwd: proc.cwd,
+        cwd: resolvedCwd,
         deskIndex: findNextFreeDesk(),
         appearance: { ...persona.appearance },
         status: proc.busy ? 'working' : 'idle',
@@ -347,18 +499,15 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
       continue;
     }
 
-    // Do not overwrite if this agent is currently running a web-triggered task
     if (runner.isRunning(agent.id)) continue;
 
-    // Update cwd if terminal changed directory
-    if (agent.cwd !== proc.cwd) {
+    if (proc.cwd && agent.cwd !== proc.cwd) {
       agent.cwd = proc.cwd;
       const persona = PROVIDER_PERSONAS[proc.provider] || PROVIDER_PERSONAS.custom;
       agent.roleTitle = `${persona.roleTitle} • ${proc.projectName}`;
       structureChanged = true;
     }
 
-    // Apply webhook override if fresh, otherwise use process activity detection
     const pidHook = hookOverrides.get(`pid:${proc.pid}`);
     const provHook = hookOverrides.get(`provider:${proc.provider}`);
     const activeHook =
@@ -398,7 +547,14 @@ const terminalWatcher = new TerminalWatcher(
 );
 terminalWatcher.start(1500);
 
-function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
+function handleClientMessage(ws: WebSocket, rawMsg: unknown): void {
+  if (!rawMsg || typeof rawMsg !== 'object' || typeof (rawMsg as { type?: unknown }).type !== 'string') {
+    sendTo(ws, { type: 'error', message: 'Mensagem inválida.' });
+    return;
+  }
+
+  const msg = rawMsg as WsClientMessage;
+
   switch (msg.type) {
     case 'refresh_providers': {
       providers = detectProviders();
@@ -408,20 +564,44 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
     }
 
     case 'set_default_cwd': {
-      defaultCwd = msg.cwd.trim() || defaultCwd;
+      const validCwd = validateWorkspacePath(msg.cwd, defaultCwd);
+      if (!validCwd) {
+        sendTo(ws, {
+          type: 'error',
+          message: 'Diretório inválido ou fora do escopo permitido (home do usuário).',
+        });
+        return;
+      }
+      defaultCwd = validCwd;
       saveState();
       broadcast({ type: 'snapshot', data: getSnapshot() });
       return;
     }
 
     case 'create_agent': {
+      const manualCount = agents.filter((a) => a.origin === 'manual').length;
+      if (manualCount >= MAX_MANUAL_AGENTS) {
+        sendTo(ws, {
+          type: 'error',
+          message: `Limite máximo de ${MAX_MANUAL_AGENTS} agentes manuais atingido.`,
+        });
+        return;
+      }
+      const validated = parseCreateAgentPayload(msg.agent, defaultCwd);
+      if (!validated) {
+        sendTo(ws, {
+          type: 'error',
+          message: 'Dados inválidos para criar agente (verifique nome, provedor e diretório).',
+        });
+        return;
+      }
       const newAgent: AgentRecord = {
-        ...msg.agent,
+        ...validated,
         id: `agent-${Date.now().toString(36)}`,
         origin: 'manual',
         deskIndex:
-          typeof msg.agent.deskIndex === 'number'
-            ? msg.agent.deskIndex
+          validated.deskIndex !== undefined
+            ? validated.deskIndex
             : findNextFreeDesk(),
         status: 'idle',
         messages: [],
@@ -433,15 +613,30 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
     }
 
     case 'update_agent': {
+      if (typeof msg.agentId !== 'string') return;
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) return;
-      Object.assign(agent, msg.patch);
+      const patch = parseUpdateAgentPatch(msg.patch, agent, defaultCwd);
+      if (!patch) {
+        sendTo(ws, {
+          type: 'error',
+          message: 'Alteração inválida (verifique provedor, nome ou diretório).',
+        });
+        return;
+      }
+      if (patch.name !== undefined) agent.name = patch.name;
+      if (patch.roleTitle !== undefined) agent.roleTitle = patch.roleTitle;
+      if (patch.provider !== undefined) agent.provider = patch.provider;
+      if ('customCommand' in patch) agent.customCommand = patch.customCommand;
+      if (patch.cwd !== undefined) agent.cwd = patch.cwd;
+      if (patch.appearance !== undefined) agent.appearance = patch.appearance;
       saveState();
       broadcast({ type: 'snapshot', data: getSnapshot() });
       return;
     }
 
     case 'delete_agent': {
+      if (typeof msg.agentId !== 'string') return;
       runner.abort(msg.agentId);
       agents = agents.filter((a) => a.id !== msg.agentId);
       saveState();
@@ -450,6 +645,7 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
     }
 
     case 'clear_history': {
+      if (typeof msg.agentId !== 'string') return;
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) return;
       agent.messages = [];
@@ -458,6 +654,7 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
     }
 
     case 'abort_task': {
+      if (typeof msg.agentId !== 'string') return;
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) return;
       runner.abort(agent.id);
@@ -468,9 +665,31 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
     }
 
     case 'run_task': {
+      if (typeof msg.agentId !== 'string' || typeof msg.prompt !== 'string') {
+        sendTo(ws, { type: 'error', message: 'Prompt ou agente inválido.' });
+        return;
+      }
+      const prompt = msg.prompt.trim();
+      if (!prompt || prompt.length > MAX_PROMPT_LENGTH) {
+        sendTo(ws, {
+          type: 'error',
+          message: `O prompt deve ter entre 1 e ${MAX_PROMPT_LENGTH} caracteres.`,
+        });
+        return;
+      }
+
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) {
         sendTo(ws, { type: 'error', message: 'Agente não encontrado.' });
+        return;
+      }
+
+      const taskCwd = validateWorkspacePath(msg.cwd ?? agent.cwd, defaultCwd);
+      if (!taskCwd) {
+        sendTo(ws, {
+          type: 'error',
+          message: 'Workspace inválido ou fora do diretório permitido.',
+        });
         return;
       }
 
@@ -481,11 +700,11 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
       const userMsg: ChatMessage = {
         id: `msg-u-${Date.now().toString(36)}`,
         role: 'user',
-        content: msg.prompt,
+        content: prompt,
         timestamp: Date.now(),
         status: 'done',
       };
-      agent.messages.push(userMsg);
+      appendMessageBounded(agent, userMsg);
       broadcast({ type: 'message_added', agentId: agent.id, message: userMsg });
 
       const assistantMsg: ChatMessage = {
@@ -496,7 +715,7 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
         status: 'streaming',
         toolActivity: 'Indo para a mesa...',
       };
-      agent.messages.push(assistantMsg);
+      appendMessageBounded(agent, assistantMsg);
       broadcast({ type: 'message_added', agentId: agent.id, message: assistantMsg });
 
       agent.status = 'working';
@@ -508,9 +727,7 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
         currentActivity: agent.currentActivity,
       });
 
-      const taskCwd = msg.cwd?.trim() || agent.cwd || defaultCwd;
-
-      runner.run(agent, provider, msg.prompt, taskCwd, {
+      runner.run(agent, provider, prompt, taskCwd, {
         onActivity: (activity) => {
           agent.currentActivity = activity;
           assistantMsg.toolActivity = activity;
@@ -557,7 +774,11 @@ function handleClientMessage(ws: WebSocket, msg: WsClientMessage): void {
           }
         },
       });
+      return;
     }
+
+    default:
+      sendTo(ws, { type: 'error', message: 'Tipo de mensagem não suportado.' });
   }
 }
 
@@ -566,7 +787,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (raw) => {
     try {
-      const parsed = JSON.parse(raw.toString('utf8')) as WsClientMessage;
+      const parsed = JSON.parse(raw.toString('utf8'));
       handleClientMessage(ws, parsed);
     } catch (err) {
       sendTo(ws, {
@@ -577,11 +798,13 @@ wss.on('connection', (ws) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   const installed = providers
     .filter((p) => p.installed && p.id !== 'demo' && p.id !== 'custom')
     .map((p) => p.binary);
-  console.log(`\n🏢 AI Office Server rodando em http://localhost:${PORT}`);
+  console.log(`\n🏢 AI Office Server rodando em http://${HOST}:${PORT}`);
+  console.log(`🔒 Origens permitidas: ${Array.from(ALLOWED_ORIGINS).join(', ')}`);
+  console.log(`🔑 Token de sessão salvo em ${TOKEN_PATH} (permissão 0600)`);
   console.log(
     `🤖 CLIs detectados: ${installed.length > 0 ? installed.join(', ') : 'nenhum (modo demo ativo)'}`
   );

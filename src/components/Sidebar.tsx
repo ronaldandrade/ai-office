@@ -1,5 +1,6 @@
 import React from 'react';
 import { Plus, Settings2, Terminal } from 'lucide-react';
+import { safeHexColor } from '../lib/sessionAuth.ts';
 import type { AgentRecord, CliProviderInfo } from '../types/office.ts';
 
 interface SidebarProps {
@@ -67,7 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="agent-card-top">
                 <div
                   className="agent-avatar-swatch"
-                  style={{ background: agent.appearance.shirtColor }}
+                  style={{ background: safeHexColor(agent.appearance.shirtColor) }}
                 >
                   <span>{agent.name.slice(0, 1).toUpperCase()}</span>
                   <span className={`status-dot ${agent.status}`} />

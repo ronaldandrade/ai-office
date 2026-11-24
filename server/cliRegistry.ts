@@ -14,6 +14,32 @@ interface ProviderSpec {
   alwaysAvailable?: boolean;
 }
 
+const DEFAULT_CUSTOM_ALLOWLIST = new Set([
+  'ollama',
+  'llm',
+  'claude',
+  'gemini',
+  'codex',
+  'agy',
+  'aider',
+  'echo',
+]);
+
+const BLOCKED_SHELL_BINARIES = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'dash',
+  'fish',
+  'ksh',
+  'csh',
+  'tcsh',
+  'cmd',
+  'cmd.exe',
+  'powershell',
+  'pwsh',
+]);
+
 const PROVIDER_SPECS: ProviderSpec[] = [
   {
     id: 'claude',
@@ -52,15 +78,15 @@ const PROVIDER_SPECS: ProviderSpec[] = [
     name: 'Aider',
     binary: 'aider',
     description: 'Aider AI pair programming no terminal',
-    defaultArgsTemplate: '--message {prompt} --yes-always',
+    defaultArgsTemplate: '--message {prompt} --no-auto-commits',
     accentColor: '#fbbf24',
   },
   {
     id: 'custom',
     name: 'CLI Customizado',
-    binary: 'sh',
-    description: 'Qualquer comando local usando {prompt} como placeholder',
-    defaultArgsTemplate: 'echo "Executando: {prompt}"',
+    binary: 'ollama',
+    description: 'Executável permitido (sem shell) usando {prompt} como argumento',
+    defaultArgsTemplate: 'echo Executando: {prompt}',
     accentColor: '#f472b6',
     alwaysAvailable: true,
   },
@@ -78,11 +104,11 @@ const PROVIDER_SPECS: ProviderSpec[] = [
 function findBinary(binary: string): string | undefined {
   const home = os.homedir();
   const extraDirs = [
+    '/usr/local/bin',
+    '/usr/bin',
     path.join(home, '.local', 'bin'),
     path.join(home, '.npm-global', 'bin'),
     path.join(home, '.bun', 'bin'),
-    '/usr/local/bin',
-    '/usr/bin',
   ];
 
   for (const dir of extraDirs) {
@@ -137,18 +163,90 @@ export function detectProviders(): CliProviderInfo[] {
   });
 }
 
+/**
+ * Splits a command template into argv tokens without invoking a shell.
+ * Supports single and double quotes for grouping spaces, without shell expansion.
+ */
+function tokenizeCommandTemplate(input: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+
+  if (quote !== null) {
+    throw new Error('Aspas não fechadas no comando customizado.');
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 export function buildCliInvocation(
   provider: CliProviderInfo,
   prompt: string,
   customCommand?: string
-): { command: string; args: string[]; shell: boolean } {
+): { command: string; args: string[]; shell: false } {
   if (provider.id === 'custom') {
     const template = (customCommand || provider.defaultArgsTemplate).trim();
-    const safePrompt = prompt.replace(/"/g, '\\"');
-    const cmd = template.includes('{prompt}')
-      ? template.replaceAll('{prompt}', `"${safePrompt}"`)
-      : `${template} "${safePrompt}"`;
-    return { command: cmd, args: [], shell: true };
+    const tokens = tokenizeCommandTemplate(template);
+    if (tokens.length === 0) {
+      throw new Error('Comando customizado vazio.');
+    }
+
+    const rawExecutable = tokens[0];
+    const baseName = path.basename(rawExecutable).toLowerCase();
+
+    if (BLOCKED_SHELL_BINARIES.has(baseName)) {
+      throw new Error(
+        `Executável "${baseName}" bloqueado por segurança. Informe o binário do CLI diretamente (sem shell).`
+      );
+    }
+
+    const allowAnyCustom = process.env.ENABLE_CUSTOM_CLI === '1';
+    if (!allowAnyCustom && !DEFAULT_CUSTOM_ALLOWLIST.has(baseName)) {
+      throw new Error(
+        `Executável "${baseName}" não está na lista permitida padrão (${Array.from(DEFAULT_CUSTOM_ALLOWLIST).join(', ')}). Defina ENABLE_CUSTOM_CLI=1 para liberar outros binários.`
+      );
+    }
+
+    const rawArgs = tokens.slice(1);
+    let replaced = false;
+    const args = rawArgs.map((arg) => {
+      if (arg.includes('{prompt}')) {
+        replaced = true;
+        return arg.replaceAll('{prompt}', prompt);
+      }
+      return arg;
+    });
+    if (!replaced) {
+      args.push(prompt);
+    }
+
+    return { command: rawExecutable, args, shell: false };
   }
 
   const bin = provider.resolvedPath || provider.binary;
@@ -164,7 +262,7 @@ export function buildCliInvocation(
     case 'aider':
       return {
         command: bin,
-        args: ['--message', prompt, '--yes-always'],
+        args: ['--message', prompt, '--no-auto-commits'],
         shell: false,
       };
     default:
