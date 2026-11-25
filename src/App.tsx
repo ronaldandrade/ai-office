@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { AddAgentModal } from './components/AddAgentModal.tsx';
 import { AgentDrawer } from './components/AgentDrawer.tsx';
+import { MeetingDrawer } from './components/MeetingDrawer.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { OfficeCanvas } from './engine/OfficeCanvas.tsx';
@@ -8,10 +9,11 @@ import { useOfficeSocket } from './hooks/useOfficeSocket.ts';
 import type { AgentRecord } from './types/office.ts';
 
 export const App: React.FC = () => {
-  const { connected, defaultCwd, providers, agents, lastError, send } =
+  const { connected, defaultCwd, providers, agents, meeting, lastError, send } =
     useOfficeSocket();
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [meetingOpen, setMeetingOpen] = useState(false);
   const [paused, setPaused] = useState(false);
   const [simSpeed, setSimSpeed] = useState(1);
   const [activities, setActivities] = useState<Record<string, string>>({});
@@ -32,6 +34,15 @@ export const App: React.FC = () => {
     setActivities(next);
   }, []);
 
+  const handleSelectAgent = useCallback((agentId: string) => {
+    setMeetingOpen(false);
+    setSelectedAgentId(agentId);
+  }, []);
+
+  const handleToggleMeeting = useCallback(() => {
+    setMeetingOpen((prev) => !prev);
+  }, []);
+
   const handleOpenAdd = () => {
     setEditingAgent(null);
     setModalOpen(true);
@@ -50,6 +61,9 @@ export const App: React.FC = () => {
         defaultCwd={defaultCwd}
         paused={paused}
         simSpeed={simSpeed}
+        meeting={meeting}
+        meetingOpen={meetingOpen}
+        onToggleMeeting={handleToggleMeeting}
         onTogglePause={() => setPaused((p) => !p)}
         onChangeSpeed={setSimSpeed}
         onRefreshProviders={() => send({ type: 'refresh_providers' })}
@@ -63,8 +77,9 @@ export const App: React.FC = () => {
           agents={agents}
           providers={providers}
           activities={activities}
-          selectedAgentId={selectedAgentId}
-          onSelectAgent={setSelectedAgentId}
+          meeting={meeting}
+          selectedAgentId={meetingOpen ? null : selectedAgentId}
+          onSelectAgent={handleSelectAgent}
           onOpenAddModal={handleOpenAdd}
           onEditAgent={handleOpenEdit}
         />
@@ -72,26 +87,50 @@ export const App: React.FC = () => {
         <section className="stage-container">
           <OfficeCanvas
             agents={agents}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={setSelectedAgentId}
+            meeting={meeting}
+            selectedAgentId={meetingOpen ? null : selectedAgentId}
+            onSelectAgent={handleSelectAgent}
             paused={paused}
             simSpeed={simSpeed}
             onActivitiesUpdate={handleActivitiesUpdate}
           />
         </section>
 
-        <AgentDrawer
-          agent={selectedAgent}
-          provider={selectedProvider}
-          liveActivity={selectedAgent ? activities[selectedAgent.id] : undefined}
-          onClose={() => setSelectedAgentId(null)}
-          onSendTask={(agentId, prompt, cwd) =>
-            send({ type: 'run_task', agentId, prompt, cwd })
-          }
-          onAbortTask={(agentId) => send({ type: 'abort_task', agentId })}
-          onClearHistory={(agentId) => send({ type: 'clear_history', agentId })}
-          onEditAgent={handleOpenEdit}
-        />
+        {meetingOpen ? (
+          <MeetingDrawer
+            meeting={meeting}
+            agents={agents}
+            providers={providers}
+            defaultCwd={defaultCwd}
+            onClose={() => setMeetingOpen(false)}
+            onStartMeeting={(payload) =>
+              send({ type: 'start_meeting', ...payload })
+            }
+            onUpdateMeeting={(patch) =>
+              send({ type: 'update_meeting', ...patch })
+            }
+            onSendMessage={(content, rounds) =>
+              send({ type: 'send_meeting_message', content, rounds })
+            }
+            onAbortMeeting={() => send({ type: 'abort_meeting' })}
+            onClearHistory={() => send({ type: 'clear_meeting_history' })}
+            onEndMeeting={() => send({ type: 'end_meeting' })}
+            onOpenAddAgent={handleOpenAdd}
+          />
+        ) : (
+          <AgentDrawer
+            agent={selectedAgent}
+            provider={selectedProvider}
+            liveActivity={selectedAgent ? activities[selectedAgent.id] : undefined}
+            onClose={() => setSelectedAgentId(null)}
+            onSendTask={(agentId, prompt, cwd) =>
+              send({ type: 'run_task', agentId, prompt, cwd })
+            }
+            onAbortTask={(agentId) => send({ type: 'abort_task', agentId })}
+            onClearHistory={(agentId) => send({ type: 'clear_history', agentId })}
+            onEditAgent={handleOpenEdit}
+          />
+        )}
       </main>
 
       {modalOpen && (

@@ -34,19 +34,50 @@ export interface FurnitureItem {
     | 'counter'
     | 'water_cooler'
     | 'fridge'
+    | 'server_rack'
     | 'sofa'
+    | 'sofa_side'
     | 'coffee_table'
+    | 'bistro_table'
+    | 'printer'
     | 'plant'
     | 'bookshelf'
     | 'whiteboard'
-    | 'rug_accent';
+    | 'floor_lamp'
+    | 'wall_clock'
+    | 'wall_poster'
+    | 'corkboard';
   tx: number;
   ty: number;
   w: number;
   h: number;
   solid: boolean;
   deskIndex?: number;
+  variant?: number;
 }
+
+export interface MeetingSpot {
+  tx: number;
+  ty: number;
+  facing: Direction;
+}
+
+export const MEETING_SPOTS: MeetingSpot[] = [
+  // Around the lounge coffee table (tx: 17..18, ty: 11)
+  { tx: 17, ty: 10, facing: 'down' },
+  { tx: 18, ty: 10, facing: 'down' },
+  { tx: 16, ty: 11, facing: 'right' },
+  { tx: 19, ty: 11, facing: 'left' },
+  { tx: 17, ty: 12, facing: 'up' },
+  { tx: 18, ty: 12, facing: 'up' },
+  // Overflow spots around the meeting circle
+  { tx: 16, ty: 12, facing: 'right' },
+  { tx: 19, ty: 12, facing: 'left' },
+  { tx: 20, ty: 10, facing: 'left' },
+  { tx: 16, ty: 10, facing: 'right' },
+  { tx: 20, ty: 11, facing: 'left' },
+  { tx: 20, ty: 12, facing: 'left' },
+];
 
 export const DESK_SLOTS: DeskSlot[] = [
   // Top row of desks
@@ -60,6 +91,13 @@ export const DESK_SLOTS: DeskSlot[] = [
 ];
 
 export const FURNITURE: FurnitureItem[] = [
+  // Wall decorations (mounted on wall row ty=1, already non-walkable)
+  { id: 'clock-1', kind: 'wall_clock', tx: 1, ty: 1, w: 1, h: 1, solid: false },
+  { id: 'poster-1', kind: 'wall_poster', tx: 6, ty: 1, w: 1, h: 1, solid: false, variant: 0 },
+  { id: 'poster-2', kind: 'wall_poster', tx: 11, ty: 1, w: 1, h: 1, solid: false, variant: 1 },
+  { id: 'whiteboard-1', kind: 'whiteboard', tx: 13, ty: 1, w: 2, h: 1, solid: true },
+  { id: 'corkboard-1', kind: 'corkboard', tx: 15, ty: 1, w: 1, h: 1, solid: false },
+
   // Desks (2x1) & Chairs (1x1 non-solid so characters can sit on them)
   ...DESK_SLOTS.flatMap((slot): FurnitureItem[] => [
     {
@@ -84,25 +122,29 @@ export const FURNITURE: FurnitureItem[] = [
     },
   ]),
 
-  // Cafe corner (top-right)
+  // Cafe & Tech corner (top-right)
   { id: 'counter-1', kind: 'counter', tx: 16, ty: 2, w: 3, h: 1, solid: true },
   { id: 'coffee-1', kind: 'coffee_machine', tx: 17, ty: 2, w: 1, h: 1, solid: true },
   { id: 'water-1', kind: 'water_cooler', tx: 20, ty: 2, w: 1, h: 1, solid: true },
   { id: 'fridge-1', kind: 'fridge', tx: 21, ty: 2, w: 1, h: 1, solid: true },
+  { id: 'server-1', kind: 'server_rack', tx: 22, ty: 2, w: 1, h: 1, solid: true },
+  { id: 'bistro-1', kind: 'bistro_table', tx: 21, ty: 5, w: 1, h: 1, solid: true },
 
-  // Whiteboard on top-middle wall area
-  { id: 'whiteboard-1', kind: 'whiteboard', tx: 13, ty: 1, w: 2, h: 1, solid: true },
+  // Office printer station along left wall between desk rows
+  { id: 'printer-1', kind: 'printer', tx: 1, ty: 7, w: 1, h: 1, solid: true },
 
   // Lounge area (bottom-right)
+  { id: 'lamp-1', kind: 'floor_lamp', tx: 15, ty: 8, w: 1, h: 1, solid: true },
   { id: 'sofa-1', kind: 'sofa', tx: 17, ty: 9, w: 3, h: 1, solid: true },
+  { id: 'sofa-side-1', kind: 'sofa_side', tx: 22, ty: 10, w: 1, h: 2, solid: true },
   { id: 'table-1', kind: 'coffee_table', tx: 17, ty: 11, w: 2, h: 1, solid: true },
   { id: 'bookshelf-1', kind: 'bookshelf', tx: 21, ty: 8, w: 2, h: 1, solid: true },
 
   // Plants
-  { id: 'plant-1', kind: 'plant', tx: 1, ty: 2, w: 1, h: 1, solid: true },
-  { id: 'plant-2', kind: 'plant', tx: 1, ty: 13, w: 1, h: 1, solid: true },
-  { id: 'plant-3', kind: 'plant', tx: 14, ty: 13, w: 1, h: 1, solid: true },
-  { id: 'plant-4', kind: 'plant', tx: 22, ty: 13, w: 1, h: 1, solid: true },
+  { id: 'plant-1', kind: 'plant', tx: 1, ty: 2, w: 1, h: 1, solid: true, variant: 0 },
+  { id: 'plant-2', kind: 'plant', tx: 1, ty: 13, w: 1, h: 1, solid: true, variant: 1 },
+  { id: 'plant-3', kind: 'plant', tx: 14, ty: 13, w: 1, h: 1, solid: true, variant: 2 },
+  { id: 'plant-4', kind: 'plant', tx: 22, ty: 13, w: 1, h: 1, solid: true, variant: 0 },
 ];
 
 export const POINTS_OF_INTEREST: PointOfInterest[] = [

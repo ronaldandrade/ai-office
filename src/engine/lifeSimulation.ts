@@ -3,8 +3,9 @@ import type {
   AgentRecord,
   Direction,
   LifeActivity,
+  MeetingState,
 } from '../types/office.ts';
-import { DESK_SLOTS, POINTS_OF_INTEREST } from './officeMap.ts';
+import { DESK_SLOTS, MEETING_SPOTS, POINTS_OF_INTEREST } from './officeMap.ts';
 import { findPath } from './pathfinding.ts';
 
 const COFFEE_QUOTES = [
@@ -142,6 +143,8 @@ function isEntityFreeForChat(entity: AgentEntity, record?: AgentRecord): boolean
   return (
     entity.activity !== 'working' &&
     entity.activity !== 'walking_to_desk' &&
+    entity.activity !== 'walking_to_meeting' &&
+    entity.activity !== 'in_meeting' &&
     entity.activity !== 'chatting'
   );
 }
@@ -262,10 +265,18 @@ export function stepLifeSimulation(
   dt: number,
   records: AgentRecord[],
   entities: Map<string, AgentEntity>,
-  speedMultiplier = 1
+  speedMultiplier = 1,
+  meeting?: MeetingState
 ): void {
   const scaledDt = Math.min(dt, 0.1) * speedMultiplier;
   const recordsById = new Map(records.map((r) => [r.id, r]));
+  const meetingActive = Boolean(meeting?.active);
+  const meetingSpotByAgent = new Map<string, number>();
+  if (meetingActive && meeting) {
+    meeting.participantIds.forEach((id, idx) => {
+      meetingSpotByAgent.set(id, idx);
+    });
+  }
 
   // Sync added/removed agents
   for (const rec of records) {
@@ -290,44 +301,98 @@ export function stepLifeSimulation(
     }
 
     const desk = DESK_SLOTS[rec.deskIndex % DESK_SLOTS.length];
+    const meetingSlotIdx = meetingSpotByAgent.get(rec.id);
+    const isInActiveMeeting = meetingActive && meetingSlotIdx !== undefined;
 
-    // Transition to working immediately when backend says working
-    if (rec.status === 'working') {
-      if (entity.activity !== 'working' && entity.activity !== 'walking_to_desk') {
+    if (isInActiveMeeting) {
+      const spot = MEETING_SPOTS[meetingSlotIdx % MEETING_SPOTS.length];
+      const distToSpot = Math.hypot(entity.x - spot.tx, entity.y - spot.ty);
+
+      if (entity.activity !== 'walking_to_meeting' && entity.activity !== 'in_meeting') {
         clearChatPartner(entity, entities);
         entity.targetPoiId = undefined;
         entity.holdingItem = null;
-        const distToDesk = Math.hypot(entity.x - desk.seatTx, entity.y - desk.seatTy);
-        if (distToDesk < 0.15) {
-          entity.x = desk.seatTx;
-          entity.y = desk.seatTy;
-          entity.dir = desk.facing;
-          entity.activity = 'working';
+        if (distToSpot < 0.15) {
+          entity.x = spot.tx;
+          entity.y = spot.ty;
+          entity.dir = spot.facing;
+          entity.activity = 'in_meeting';
+          entity.targetActivity = 'in_meeting';
           entity.path = [];
         } else {
-          entity.activity = 'walking_to_desk';
-          entity.targetActivity = 'working';
-          entity.targetFacing = desk.facing;
-          entity.path = findPath(entity.x, entity.y, desk.seatTx, desk.seatTy);
-          entity.bubbleText = '⚡ Indo para a mesa!';
+          entity.activity = 'walking_to_meeting';
+          entity.targetActivity = 'in_meeting';
+          entity.targetFacing = spot.facing;
+          entity.path = findPath(entity.x, entity.y, spot.tx, spot.ty);
+          entity.bubbleText = '📣 Indo para a reunião!';
           entity.bubbleTimer = 2.4;
         }
+      } else if (entity.activity === 'in_meeting' && distToSpot >= 0.25) {
+        // Re-route if participant spot index shifted
+        entity.activity = 'walking_to_meeting';
+        entity.targetActivity = 'in_meeting';
+        entity.targetFacing = spot.facing;
+        entity.path = findPath(entity.x, entity.y, spot.tx, spot.ty);
+      } else if (entity.activity === 'walking_to_meeting') {
+        const dest = entity.path[entity.path.length - 1];
+        if (dest && (dest.tx !== spot.tx || dest.ty !== spot.ty)) {
+          entity.targetFacing = spot.facing;
+          entity.path = findPath(entity.x, entity.y, spot.tx, spot.ty);
+        }
       }
-    } else if (entity.activity === 'working' || entity.activity === 'walking_to_desk') {
-      // Finished work! Take a short breath at desk then live life
+    } else if (entity.activity === 'in_meeting' || entity.activity === 'walking_to_meeting') {
       entity.activity = 'idle_desk';
       entity.targetActivity = 'idle_desk';
-      entity.stateTimer = randRange(2.0, 4.5);
-      entity.bubbleText = '✅ Concluído!';
-      entity.bubbleTimer = 2.6;
+      entity.path = [];
+      entity.stateTimer = randRange(1.0, 2.5);
+      entity.bubbleText = '👋 Reunião encerrada!';
+      entity.bubbleTimer = 2.4;
+    }
+
+    // Transition to working immediately when backend says working (unless in active meeting)
+    if (!isInActiveMeeting) {
+      if (rec.status === 'working') {
+        if (entity.activity !== 'working' && entity.activity !== 'walking_to_desk') {
+          clearChatPartner(entity, entities);
+          entity.targetPoiId = undefined;
+          entity.holdingItem = null;
+          const distToDesk = Math.hypot(entity.x - desk.seatTx, entity.y - desk.seatTy);
+          if (distToDesk < 0.15) {
+            entity.x = desk.seatTx;
+            entity.y = desk.seatTy;
+            entity.dir = desk.facing;
+            entity.activity = 'working';
+            entity.path = [];
+          } else {
+            entity.activity = 'walking_to_desk';
+            entity.targetActivity = 'working';
+            entity.targetFacing = desk.facing;
+            entity.path = findPath(entity.x, entity.y, desk.seatTx, desk.seatTy);
+            entity.bubbleText = '⚡ Indo para a mesa!';
+            entity.bubbleTimer = 2.4;
+          }
+        }
+      } else if (entity.activity === 'working' || entity.activity === 'walking_to_desk') {
+        // Finished work! Take a short breath at desk then live life
+        entity.activity = 'idle_desk';
+        entity.targetActivity = 'idle_desk';
+        entity.stateTimer = randRange(2.0, 4.5);
+        entity.bubbleText = '✅ Concluído!';
+        entity.bubbleTimer = 2.6;
+      }
     }
 
     // Movement along A* path
     if (
-      (entity.activity === 'walking_to_desk' || entity.activity === 'walking_to_poi') &&
+      (entity.activity === 'walking_to_desk' ||
+        entity.activity === 'walking_to_poi' ||
+        entity.activity === 'walking_to_meeting') &&
       entity.path.length > 0
     ) {
-      const speed = entity.activity === 'walking_to_desk' ? 4.4 : 2.3;
+      const speed =
+        entity.activity === 'walking_to_desk' || entity.activity === 'walking_to_meeting'
+          ? 4.0
+          : 2.3;
       const next = entity.path[0];
       const dx = next.tx - entity.x;
       const dy = next.ty - entity.y;
@@ -357,6 +422,23 @@ export function stepLifeSimulation(
       entity.y = desk.seatTy;
       entity.dir = desk.facing;
       entity.activity = 'working';
+      continue;
+    }
+
+    if (entity.activity === 'walking_to_meeting' && isInActiveMeeting) {
+      const spot = MEETING_SPOTS[meetingSlotIdx! % MEETING_SPOTS.length];
+      entity.x = spot.tx;
+      entity.y = spot.ty;
+      entity.dir = spot.facing;
+      entity.activity = 'in_meeting';
+      continue;
+    }
+
+    if (entity.activity === 'in_meeting') {
+      if (isInActiveMeeting) {
+        const spot = MEETING_SPOTS[meetingSlotIdx! % MEETING_SPOTS.length];
+        entity.dir = spot.facing;
+      }
       continue;
     }
 
@@ -453,6 +535,10 @@ export function getActivityLabel(entity: AgentEntity, record: AgentRecord): stri
       return 'Cuidando das plantas 🌿';
     case 'walking_to_desk':
       return 'Indo para a mesa ⚡';
+    case 'walking_to_meeting':
+      return 'Indo para a reunião 📣';
+    case 'in_meeting':
+      return 'Na reunião 👥';
     case 'walking_to_poi':
       return 'Caminhando pelo escritório 🚶';
     default:

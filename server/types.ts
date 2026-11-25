@@ -61,10 +61,37 @@ export interface AgentRecord {
   messages: ChatMessage[];
 }
 
+export interface MeetingMessage {
+  id: string;
+  senderType: 'user' | 'agent' | 'system';
+  senderId?: string;
+  senderName: string;
+  senderRole?: string;
+  senderColor?: string;
+  content: string;
+  timestamp: number;
+  status?: 'streaming' | 'done' | 'error' | 'aborted';
+  toolActivity?: string;
+  round?: number;
+}
+
+export interface MeetingState {
+  active: boolean;
+  topic: string;
+  participantIds: string[];
+  cwd: string;
+  status: 'idle' | 'running';
+  currentSpeakerId?: string;
+  currentRound: number;
+  maxRounds: number;
+  messages: MeetingMessage[];
+}
+
 export interface OfficeStateSnapshot {
   defaultCwd: string;
   providers: CliProviderInfo[];
   agents: AgentRecord[];
+  meeting: MeetingState;
 }
 
 export type WsClientMessage =
@@ -89,7 +116,29 @@ export type WsClientMessage =
         >
       >;
     }
-  | { type: 'delete_agent'; agentId: string };
+  | { type: 'delete_agent'; agentId: string }
+  | {
+      type: 'start_meeting';
+      participantIds: string[];
+      topic?: string;
+      cwd?: string;
+      maxRounds?: number;
+    }
+  | {
+      type: 'update_meeting';
+      participantIds?: string[];
+      topic?: string;
+      cwd?: string;
+      maxRounds?: number;
+    }
+  | {
+      type: 'send_meeting_message';
+      content: string;
+      rounds?: number;
+    }
+  | { type: 'abort_meeting' }
+  | { type: 'clear_meeting_history' }
+  | { type: 'end_meeting' };
 
 export type WsServerMessage =
   | { type: 'snapshot'; data: OfficeStateSnapshot }
@@ -110,6 +159,20 @@ export type WsServerMessage =
   | {
       type: 'message_done';
       agentId: string;
+      messageId: string;
+      status: 'done' | 'error' | 'aborted';
+      finalContent?: string;
+    }
+  | { type: 'meeting_updated'; meeting: MeetingState }
+  | { type: 'meeting_message_added'; message: MeetingMessage }
+  | {
+      type: 'meeting_message_chunk';
+      messageId: string;
+      chunk: string;
+      toolActivity?: string;
+    }
+  | {
+      type: 'meeting_message_done';
       messageId: string;
       status: 'done' | 'error' | 'aborted';
       finalContent?: string;

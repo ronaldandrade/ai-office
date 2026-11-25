@@ -5,11 +5,12 @@ import {
   Play,
   RefreshCw,
   Terminal,
+  Users,
   Wifi,
   WifiOff,
   Zap,
 } from 'lucide-react';
-import type { CliProviderInfo } from '../types/office.ts';
+import type { CliProviderInfo, MeetingState } from '../types/office.ts';
 
 interface TopBarProps {
   connected: boolean;
@@ -17,6 +18,9 @@ interface TopBarProps {
   defaultCwd: string;
   paused: boolean;
   simSpeed: number;
+  meeting: MeetingState;
+  meetingOpen: boolean;
+  onToggleMeeting: () => void;
   onTogglePause: () => void;
   onChangeSpeed: (speed: number) => void;
   onRefreshProviders: () => void;
@@ -29,6 +33,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   defaultCwd,
   paused,
   simSpeed,
+  meeting,
+  meetingOpen,
+  onToggleMeeting,
   onTogglePause,
   onChangeSpeed,
   onRefreshProviders,
@@ -105,6 +112,30 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
 
       <div className="topbar-controls">
+        <button
+          className={`meeting-top-btn ${meetingOpen ? 'open' : ''} ${
+            meeting.active ? 'active' : ''
+          }`}
+          onClick={onToggleMeeting}
+          title="Abrir Modo Reunião / Chat em Grupo"
+        >
+          <Users size={14} />
+          <span>
+            {meeting.status === 'running'
+              ? `Reunião (${meeting.participantIds.length})`
+              : meeting.active
+                ? `Reunião (${meeting.participantIds.length})`
+                : 'Reunião'}
+          </span>
+          {meeting.active && (
+            <span
+              className={`meeting-top-dot ${
+                meeting.status === 'running' ? 'running' : ''
+              }`}
+            />
+          )}
+        </button>
+
         <div className="sim-controls">
           <button
             className="control-btn"

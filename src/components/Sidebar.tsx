@@ -1,12 +1,13 @@
 import React from 'react';
 import { Plus, Settings2, Terminal } from 'lucide-react';
 import { safeHexColor } from '../lib/sessionAuth.ts';
-import type { AgentRecord, CliProviderInfo } from '../types/office.ts';
+import type { AgentRecord, CliProviderInfo, MeetingState } from '../types/office.ts';
 
 interface SidebarProps {
   agents: AgentRecord[];
   providers: CliProviderInfo[];
   activities: Record<string, string>;
+  meeting: MeetingState;
   selectedAgentId: string | null;
   onSelectAgent: (id: string) => void;
   onOpenAddModal: () => void;
@@ -17,12 +18,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   agents,
   providers,
   activities,
+  meeting,
   selectedAgentId,
   onSelectAgent,
   onOpenAddModal,
   onEditAgent,
 }) => {
   const providerMap = new Map(providers.map((p) => [p.id, p]));
+  const meetingParticipantSet = new Set(
+    meeting.active ? meeting.participantIds : []
+  );
 
   return (
     <aside className="sidebar">
@@ -78,6 +83,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="agent-name-row">
                     <strong>{agent.name}</strong>
                     <div className="agent-name-badges">
+                      {meetingParticipantSet.has(agent.id) && (
+                        <span
+                          className="origin-badge meeting"
+                          title="Participando da reunião em grupo"
+                        >
+                          REUNIÃO
+                        </span>
+                      )}
                       {agent.origin === 'terminal' && (
                         <span
                           className="origin-badge terminal"

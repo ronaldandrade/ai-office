@@ -3,15 +3,28 @@ import { clearCachedSessionToken, getSessionToken } from '../lib/sessionAuth.ts'
 import type {
   AgentRecord,
   CliProviderInfo,
+  MeetingState,
   WsClientMessage,
   WsServerMessage,
 } from '../types/office.ts';
+
+const EMPTY_MEETING: MeetingState = {
+  active: false,
+  topic: '',
+  participantIds: [],
+  cwd: '',
+  status: 'idle',
+  currentRound: 0,
+  maxRounds: 1,
+  messages: [],
+};
 
 export interface OfficeSocketState {
   connected: boolean;
   defaultCwd: string;
   providers: CliProviderInfo[];
   agents: AgentRecord[];
+  meeting: MeetingState;
   lastError: string | null;
   send: (msg: WsClientMessage) => void;
 }
@@ -22,6 +35,7 @@ export function useOfficeSocket(): OfficeSocketState {
   const [defaultCwd, setDefaultCwd] = useState('');
   const [providers, setProviders] = useState<CliProviderInfo[]>([]);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
+  const [meeting, setMeeting] = useState<MeetingState>(EMPTY_MEETING);
   const [lastError, setLastError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -71,6 +85,7 @@ export function useOfficeSocket(): OfficeSocketState {
               setDefaultCwd(msg.data.defaultCwd);
               setProviders(msg.data.providers);
               setAgents(msg.data.agents);
+              setMeeting(msg.data.meeting ?? EMPTY_MEETING);
               break;
 
             case 'providers_updated':
@@ -139,6 +154,53 @@ export function useOfficeSocket(): OfficeSocketState {
               );
               break;
 
+            case 'meeting_updated':
+              setMeeting(msg.meeting);
+              setLastError(null);
+              break;
+
+            case 'meeting_message_added':
+              setLastError(null);
+              setMeeting((prev) =>
+                prev.messages.some((m) => m.id === msg.message.id)
+                  ? prev
+                  : {
+                      ...prev,
+                      messages: [...prev.messages, msg.message],
+                    }
+              );
+              break;
+
+            case 'meeting_message_chunk':
+              setMeeting((prev) => ({
+                ...prev,
+                messages: prev.messages.map((m) =>
+                  m.id === msg.messageId
+                    ? {
+                        ...m,
+                        content: m.content + msg.chunk,
+                        toolActivity: msg.toolActivity ?? m.toolActivity,
+                      }
+                    : m
+                ),
+              }));
+              break;
+
+            case 'meeting_message_done':
+              setMeeting((prev) => ({
+                ...prev,
+                messages: prev.messages.map((m) =>
+                  m.id === msg.messageId
+                    ? {
+                        ...m,
+                        status: msg.status,
+                        content: msg.finalContent ?? m.content,
+                      }
+                    : m
+                ),
+              }));
+              break;
+
             case 'error':
               setLastError(msg.message);
               break;
@@ -168,6 +230,7 @@ export function useOfficeSocket(): OfficeSocketState {
     defaultCwd,
     providers,
     agents,
+    meeting,
     lastError,
     send,
   };

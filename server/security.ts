@@ -339,3 +339,43 @@ export function parseHookPayload(raw: unknown): {
 
   return { provider, pid, event, tool, detail };
 }
+
+export const MAX_MEETING_PARTICIPANTS = 12;
+export const MAX_MEETING_TOPIC_LENGTH = 140;
+export const MAX_MEETING_MESSAGE_LENGTH = 8_000;
+export const MAX_MEETING_ROUNDS = 3;
+
+export function parseMeetingParticipantIds(
+  raw: unknown,
+  validAgentIds: Set<string>
+): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (!id || seen.has(id) || !validAgentIds.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+    if (result.length >= MAX_MEETING_PARTICIPANTS) break;
+  }
+  return result;
+}
+
+export function parseMeetingRounds(raw: unknown, fallback = 1): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
+  const n = Math.trunc(raw);
+  return Math.max(1, Math.min(MAX_MEETING_ROUNDS, n));
+}
+
+export function parseMeetingTopic(raw: unknown, fallback = ''): string {
+  return sanitizeString(raw, MAX_MEETING_TOPIC_LENGTH, fallback);
+}
+
+export function parseMeetingMessageContent(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > MAX_MEETING_MESSAGE_LENGTH) return null;
+  return trimmed;
+}

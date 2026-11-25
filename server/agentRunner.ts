@@ -269,28 +269,31 @@ export class AgentRunner {
       ? `> ⚠️ **${provider.name}** (\`${provider.binary}\`) não foi encontrado no PATH. Rodando em **Modo Simulação**!\n\n`
       : '';
 
-    const steps: Array<{ delay: number; activity: string; chunk: string }> = [
-      {
-        delay: 450,
-        activity: 'Lendo workspace...',
-        chunk: `${header}📂 Inspecionando diretório \`${cwd}\`...\n`,
-      },
-      {
-        delay: 1400,
-        activity: 'Analisando tarefa...',
-        chunk: `🧠 Entendi seu pedido: _"${prompt}"_\n\n`,
-      },
-      {
-        delay: 2500,
-        activity: 'Editando código...',
-        chunk: `⚙️ Como **${agent.roleTitle}**, organizei os próximos passos:\n1. Verificar arquivos relevantes no workspace.\n2. Aplicar as mudanças solicitadas com segurança.\n3. Validar o resultado final.\n\n`,
-      },
-      {
-        delay: 3800,
-        activity: 'Validando resultado...',
-        chunk: `✅ Tudo pronto por aqui! Vou levantar um pouco para pegar um café ☕.`,
-      },
-    ];
+    const isMeeting = prompt.startsWith('[REUNIÃO AI OFFICE]');
+    const steps: Array<{ delay: number; activity: string; chunk: string }> = isMeeting
+      ? this.buildDemoMeetingSteps(agent, prompt, header)
+      : [
+          {
+            delay: 450,
+            activity: 'Lendo workspace...',
+            chunk: `${header}📂 Inspecionando diretório \`${cwd}\`...\n`,
+          },
+          {
+            delay: 1400,
+            activity: 'Analisando tarefa...',
+            chunk: `🧠 Entendi seu pedido: _"${prompt}"_\n\n`,
+          },
+          {
+            delay: 2500,
+            activity: 'Editando código...',
+            chunk: `⚙️ Como **${agent.roleTitle}**, organizei os próximos passos:\n1. Verificar arquivos relevantes no workspace.\n2. Aplicar as mudanças solicitadas com segurança.\n3. Validar o resultado final.\n\n`,
+          },
+          {
+            delay: 3800,
+            activity: 'Validando resultado...',
+            chunk: `✅ Tudo pronto por aqui! Vou levantar um pouco para pegar um café ☕.`,
+          },
+        ];
 
     for (const step of steps) {
       const timer = setTimeout(() => {
@@ -301,11 +304,53 @@ export class AgentRunner {
       timers.push(timer);
     }
 
+    const finalDelay = isMeeting ? 2600 : 4500;
     const doneTimer = setTimeout(() => {
       if (task.aborted) return;
       this.running.delete(agent.id);
       callbacks.onDone('done');
-    }, 4500);
+    }, finalDelay);
     timers.push(doneTimer);
+  }
+
+  private buildDemoMeetingSteps(
+    agent: AgentRecord,
+    prompt: string,
+    header: string
+  ): Array<{ delay: number; activity: string; chunk: string }> {
+    // Extract the latest user prompt and previous agent contribution from the transcript
+    const userMatches = [...prompt.matchAll(/^\[Você\]:\s*(.+)$/gm)];
+    const lastUserLine = userMatches[userMatches.length - 1]?.[1]?.trim() || 'o tema da reunião';
+    const shortUser =
+      lastUserLine.length > 100 ? `${lastUserLine.slice(0, 99)}…` : lastUserLine;
+
+    const agentMatches = [...prompt.matchAll(/^\[([^\]\n]+)\]:\s*(.+)$/gm)].filter(
+      (m) =>
+        m[1] !== 'Você' &&
+        m[1] !== agent.name &&
+        !m[1].startsWith(`${agent.name} (`)
+    );
+    const prevSpeaker = agentMatches[agentMatches.length - 1]?.[1]?.trim();
+
+    const opening = prevSpeaker
+      ? `${header}Complementando o ponto de **${prevSpeaker}**, olhando pelo ângulo de **${agent.roleTitle}**:\n\n`
+      : `${header}Analisando o pedido _"${shortUser}"_ como **${agent.roleTitle}**:\n\n`;
+
+    const body = prevSpeaker
+      ? `- Concordo com a direção geral e sugiro alinharmos testes e edge cases antes de fechar.\n- Posso ficar responsável pela validação prática no workspace assim que decidirmos.`
+      : `- Vale dividir a solução em etapas pequenas e verificáveis.\n- Quero ouvir a visão dos colegas aqui na mesa antes de partirmos para a implementação.`;
+
+    return [
+      {
+        delay: 400,
+        activity: 'Na reunião: lendo histórico...',
+        chunk: opening,
+      },
+      {
+        delay: 1400,
+        activity: 'Na reunião: respondendo...',
+        chunk: body,
+      },
+    ];
   }
 }

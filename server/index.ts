@@ -7,6 +7,7 @@ import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { AgentRunner } from './agentRunner.ts';
 import { detectProviders } from './cliRegistry.ts';
+import { MeetingManager } from './meetingManager.ts';
 import {
   ALLOWED_ORIGINS,
   extractRequestToken,
@@ -360,6 +361,7 @@ app.post('/api/hook', requireAuth, (req, res) => {
 
   for (const agent of agents) {
     if (agent.origin !== 'terminal') continue;
+    if (runner.isRunning(agent.id)) continue;
     if (
       (parsed.pid && agent.terminalPid === parsed.pid) ||
       (!parsed.pid && agent.provider === parsed.provider)
@@ -407,12 +409,20 @@ const wss = new WebSocketServer({
 });
 
 const runner = new AgentRunner();
+const meetingManager = new MeetingManager({
+  getAgents: () => agents,
+  getProviders: () => providers,
+  getDefaultCwd: () => defaultCwd,
+  runner,
+  broadcast,
+});
 
 function getSnapshot(): OfficeStateSnapshot {
   return {
     defaultCwd,
     providers,
     agents,
+    meeting: meetingManager.getState(),
   };
 }
 
@@ -460,6 +470,7 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
     return a.terminalPid !== undefined && livePids.has(a.terminalPid);
   });
   if (agents.length !== beforeLen) {
+    meetingManager.handleAgentsRemoved(new Set(agents.map((a) => a.id)));
     structureChanged = true;
   }
 
@@ -639,6 +650,7 @@ function handleClientMessage(ws: WebSocket, rawMsg: unknown): void {
       if (typeof msg.agentId !== 'string') return;
       runner.abort(msg.agentId);
       agents = agents.filter((a) => a.id !== msg.agentId);
+      meetingManager.handleAgentsRemoved(new Set(agents.map((a) => a.id)));
       saveState();
       broadcast({ type: 'snapshot', data: getSnapshot() });
       return;
@@ -657,10 +669,66 @@ function handleClientMessage(ws: WebSocket, rawMsg: unknown): void {
       if (typeof msg.agentId !== 'string') return;
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) return;
+      if (meetingManager.isAgentBusyInMeeting(agent.id)) {
+        meetingManager.abortRound();
+        return;
+      }
       runner.abort(agent.id);
       agent.status = 'idle';
       agent.currentActivity = undefined;
       broadcast({ type: 'agent_status', agentId: agent.id, status: 'idle' });
+      return;
+    }
+
+    case 'start_meeting': {
+      const res = meetingManager.startMeeting({
+        participantIds: msg.participantIds,
+        topic: msg.topic,
+        cwd: msg.cwd,
+        maxRounds: msg.maxRounds,
+      });
+      if (!res.ok) {
+        sendTo(ws, { type: 'error', message: res.error });
+      }
+      return;
+    }
+
+    case 'update_meeting': {
+      const res = meetingManager.updateMeeting({
+        participantIds: msg.participantIds,
+        topic: msg.topic,
+        cwd: msg.cwd,
+        maxRounds: msg.maxRounds,
+      });
+      if (!res.ok) {
+        sendTo(ws, { type: 'error', message: res.error });
+      }
+      return;
+    }
+
+    case 'send_meeting_message': {
+      const res = meetingManager.sendMessage({
+        content: msg.content,
+        rounds: msg.rounds,
+      });
+      if (!res.ok) {
+        sendTo(ws, { type: 'error', message: res.error });
+      }
+      return;
+    }
+
+    case 'abort_meeting': {
+      meetingManager.abortRound();
+      return;
+    }
+
+    case 'clear_meeting_history': {
+      meetingManager.clearHistory();
+      return;
+    }
+
+    case 'end_meeting': {
+      meetingManager.endMeeting();
       return;
     }
 
@@ -681,6 +749,14 @@ function handleClientMessage(ws: WebSocket, rawMsg: unknown): void {
       const agent = agents.find((a) => a.id === msg.agentId);
       if (!agent) {
         sendTo(ws, { type: 'error', message: 'Agente não encontrado.' });
+        return;
+      }
+
+      if (meetingManager.isAgentBusyInMeeting(agent.id)) {
+        sendTo(ws, {
+          type: 'error',
+          message: `${agent.name} está participando de uma rodada ativa na reunião. Pare ou aguarde a rodada terminar.`,
+        });
         return;
       }
 

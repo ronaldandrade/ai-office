@@ -4,6 +4,8 @@ export type {
   AgentSummary,
   ChatMessage,
   CliProviderInfo,
+  MeetingMessage,
+  MeetingState,
   OfficeStateSnapshot,
   ProviderId,
   WsClientMessage,
@@ -17,6 +19,8 @@ export type LifeActivity =
   | 'working'
   | 'walking_to_desk'
   | 'walking_to_poi'
+  | 'walking_to_meeting'
+  | 'in_meeting'
   | 'drinking_coffee'
   | 'drinking_water'
   | 'looking_window'
