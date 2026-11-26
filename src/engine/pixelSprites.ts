@@ -1830,6 +1830,103 @@ export function drawAgentBubblesHiDPI(
   ctx.restore();
 }
 
+export const PORTRAIT_SIZE = 20;
+
+/**
+ * Renders a crisp 20x20 16-bit pixel-art bust portrait for Sidebar, Drawers & Meeting chat.
+ * Uses the exact same palette ramp, deterministic hairstyle and accessories as the office sprite.
+ */
+export function drawAgentPortrait(
+  ctx: CanvasRenderingContext2D,
+  agent: Pick<AgentRecord, 'id' | 'name' | 'provider' | 'appearance'>
+): void {
+  const S = PORTRAIT_SIZE;
+  const accent = getProviderAccent(agent.provider);
+  const skin = buildRamp(agent.appearance.skinColor);
+  const hair = buildRamp(agent.appearance.hairColor);
+  const shirt = buildRamp(agent.appearance.shirtColor);
+  const { accessory } = agent.appearance;
+
+  const idHash = hashString(`${agent.id}:${agent.name}`);
+  const hairStyle = idHash % 5;
+
+  ctx.clearRect(0, 0, S, S);
+
+  // Subtle dark studio backdrop tinted by provider accent
+  const bgTop = mixColors('#131b2e', accent, 0.28);
+  const bgMid = mixColors('#101727', accent, 0.16);
+  const bgBot = mixColors('#0c1220', accent, 0.1);
+  px(ctx, 0, 0, S, 7, bgTop);
+  px(ctx, 0, 7, S, 7, bgMid);
+  px(ctx, 0, 14, S, 6, bgBot);
+
+  // Soft studio halo behind head
+  const halo = mixColors('#1e293b', accent, 0.36);
+  px(ctx, 3, 2, 14, 12, halo);
+  px(ctx, 5, 1, 10, 14, halo);
+  // Subtle top highlight pixels
+  px(ctx, 2, 1, 2, 1, mixColors('#ffffff', accent, 0.55));
+
+  // === SHOULDERS & SHIRT BUST ===
+  px(ctx, 2, 15, 16, 5, OUTLINE);
+  px(ctx, 3, 14, 14, 6, OUTLINE);
+  px(ctx, 3, 15, 14, 5, shirt.base);
+  px(ctx, 4, 15, 12, 1, shirt.highlight);
+  px(ctx, 3, 18, 14, 2, shirt.shadow);
+  // Subtle shoulder seams & collar
+  px(ctx, 6, 16, 1, 4, shirt.shadow);
+  px(ctx, 13, 16, 1, 4, shirt.shadow);
+  // Neck & collar V
+  px(ctx, 8, 14, 4, 2, skin.shadow);
+  px(ctx, 9, 14, 2, 2, skin.base);
+  px(ctx, 7, 15, 1, 2, shirt.highlight);
+  px(ctx, 12, 15, 1, 2, shirt.highlight);
+
+  // === HEAD (same 12x11 proportions & offsets as office sprite!) ===
+  const hx = 4;
+  const hy = 4;
+  outlinedBox(ctx, hx, hy, 12, 11, skin.base, OUTLINE, skin.highlight, skin.shadow);
+
+  // Ears
+  px(ctx, hx - 1, hy + 5, 1, 3, skin.shadow);
+  px(ctx, hx + 12, hy + 5, 1, 3, skin.shadow);
+
+  // Subtle cheek warmth
+  px(ctx, hx + 2, hy + 7, 2, 1, mixColors(skin.base, '#f472b6', 0.25));
+  px(ctx, hx + 8, hy + 7, 2, 1, mixColors(skin.base, '#f472b6', 0.25));
+
+  // Expressive eyes with crisp catchlight
+  px(ctx, hx + 2, hy + 5, 2, 2, '#0f172a');
+  px(ctx, hx + 8, hy + 5, 2, 2, '#0f172a');
+  px(ctx, hx + 2, hy + 5, 1, 1, '#ffffff');
+  px(ctx, hx + 8, hy + 5, 1, 1, '#ffffff');
+
+  // Subtle confident expression
+  px(ctx, hx + 5, hy + 8, 2, 1, skin.shadow);
+
+  // === HAIR (100% consistent with office sprite) ===
+  drawHair(ctx, hx, hy, 'down', hairStyle, hair);
+
+  // === ACCESSORIES ===
+  if (accessory === 'glasses') {
+    px(ctx, hx + 1, hy + 4, 4, 4, '#1e293b');
+    px(ctx, hx + 7, hy + 4, 4, 4, '#1e293b');
+    px(ctx, hx + 2, hy + 5, 2, 2, 'rgba(186, 230, 253, 0.58)');
+    px(ctx, hx + 8, hy + 5, 2, 2, 'rgba(186, 230, 253, 0.58)');
+    px(ctx, hx + 5, hy + 5, 2, 1, '#1e293b');
+  } else if (accessory === 'headphones') {
+    px(ctx, hx, hy - 3, 12, 2, '#334155');
+    px(ctx, hx + 2, hy - 3, 8, 1, '#94a3b8');
+    outlinedBox(ctx, hx - 2, hy + 3, 3, 6, '#334155', OUTLINE, accent);
+    outlinedBox(ctx, hx + 11, hy + 3, 3, 6, '#334155', OUTLINE, accent);
+  } else if (accessory === 'cap') {
+    const capColor = mixColors(agent.appearance.shirtColor, '#0f172a', 0.45);
+    const capRamp = buildRamp(capColor);
+    outlinedBox(ctx, hx - 1, hy - 3, 14, 5, capRamp.base, OUTLINE, capRamp.highlight, capRamp.shadow);
+    outlinedBox(ctx, hx, hy + 1, 12, 3, capRamp.shadow, OUTLINE);
+  }
+}
+
 export function getSortedFurniture(): FurnitureItem[] {
   return [...FURNITURE].sort((a, b) => a.ty - b.ty);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { clearCachedSessionToken, getSessionToken } from '../lib/sessionAuth.ts';
+import { clearCachedSession, ensureSession } from '../lib/sessionAuth.ts';
 import type {
   AgentRecord,
   CliProviderInfo,
@@ -49,16 +49,16 @@ export function useOfficeSocket(): OfficeSocketState {
     };
 
     const connect = async () => {
-      const token = await getSessionToken(true);
+      const ok = await ensureSession(true);
       if (closed) return;
-      if (!token) {
+      if (!ok) {
         setConnected(false);
         scheduleReconnect();
         return;
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+      const url = `${protocol}//${window.location.host}/ws`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -69,7 +69,7 @@ export function useOfficeSocket(): OfficeSocketState {
 
       ws.onclose = () => {
         setConnected(false);
-        clearCachedSessionToken();
+        clearCachedSession();
         scheduleReconnect();
       };
 

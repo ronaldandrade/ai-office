@@ -17,6 +17,7 @@ import type {
   CliProviderInfo,
   MeetingState,
 } from '../types/office.ts';
+import { AgentAvatar } from './AgentAvatar.tsx';
 
 interface MeetingDrawerProps {
   meeting: MeetingState;
@@ -489,14 +490,18 @@ export const MeetingDrawer: React.FC<MeetingDrawerProps> = ({
                 >
                   <div className="bubble-header">
                     <div className="meeting-sender-meta">
-                      <span
-                        className="meeting-sender-avatar"
-                        style={{
-                          background: safeHexColor(m.senderColor || '#38bdf8'),
-                        }}
-                      >
-                        {m.senderName.slice(0, 1).toUpperCase()}
-                      </span>
+                      {m.senderId && agentsById.has(m.senderId) ? (
+                        <AgentAvatar agent={agentsById.get(m.senderId)!} size="sm" />
+                      ) : (
+                        <span
+                          className="meeting-sender-avatar"
+                          style={{
+                            background: safeHexColor(m.senderColor || '#38bdf8'),
+                          }}
+                        >
+                          {m.senderName.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
                       <button
                         type="button"
                         className="meeting-sender-name-btn"

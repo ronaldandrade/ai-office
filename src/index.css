@@ -275,6 +275,65 @@ body,
   height: 38px;
 }
 
+.pixel-avatar-frame {
+  position: relative;
+  flex-shrink: 0;
+  border-radius: 9px;
+  border: 1px solid #334155;
+  background: #101727;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.pixel-avatar-frame.status-working {
+  border-color: rgba(74, 222, 128, 0.7);
+  box-shadow:
+    0 0 0 1px rgba(74, 222, 128, 0.22),
+    0 2px 8px rgba(74, 222, 128, 0.18);
+}
+
+.pixel-avatar-frame.status-error {
+  border-color: rgba(248, 113, 113, 0.7);
+}
+
+.pixel-avatar-frame.size-xs {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+}
+
+.pixel-avatar-frame.size-sm {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.pixel-avatar-frame.size-md {
+  width: 42px;
+  height: 42px;
+}
+
+.pixel-avatar-frame.size-lg {
+  width: 44px;
+  height: 44px;
+  border-width: 2px;
+}
+
+.pixel-avatar-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 7px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.pixel-avatar-frame.size-sm .pixel-avatar-canvas,
+.pixel-avatar-frame.size-xs .pixel-avatar-canvas {
+  border-radius: 4px;
+}
+
 .status-dot {
   position: absolute;
   bottom: -2px;

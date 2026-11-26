@@ -1,7 +1,7 @@
 import React from 'react';
 import { Plus, Settings2, Terminal } from 'lucide-react';
-import { safeHexColor } from '../lib/sessionAuth.ts';
 import type { AgentRecord, CliProviderInfo, MeetingState } from '../types/office.ts';
+import { AgentAvatar } from './AgentAvatar.tsx';
 
 interface SidebarProps {
   agents: AgentRecord[];
@@ -71,13 +71,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={() => onSelectAgent(agent.id)}
             >
               <div className="agent-card-top">
-                <div
-                  className="agent-avatar-swatch"
-                  style={{ background: safeHexColor(agent.appearance.shirtColor) }}
-                >
-                  <span>{agent.name.slice(0, 1).toUpperCase()}</span>
-                  <span className={`status-dot ${agent.status}`} />
-                </div>
+                <AgentAvatar agent={agent} size="md" showStatusDot />
 
                 <div className="agent-card-meta">
                   <div className="agent-name-row">

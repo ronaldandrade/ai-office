@@ -14,7 +14,7 @@ interface ProviderSpec {
   alwaysAvailable?: boolean;
 }
 
-const DEFAULT_CUSTOM_ALLOWLIST = new Set([
+export const DEFAULT_CUSTOM_ALLOWLIST = new Set([
   'ollama',
   'llm',
   'claude',
@@ -25,7 +25,7 @@ const DEFAULT_CUSTOM_ALLOWLIST = new Set([
   'echo',
 ]);
 
-const BLOCKED_SHELL_BINARIES = new Set([
+export const BLOCKED_SHELL_BINARIES = new Set([
   'sh',
   'bash',
   'zsh',
@@ -38,7 +38,17 @@ const BLOCKED_SHELL_BINARIES = new Set([
   'cmd.exe',
   'powershell',
   'pwsh',
+  'env',
+  'sudo',
+  'su',
+  'doas',
+  'xargs',
+  'nohup',
+  'timeout',
 ]);
+
+const BARE_EXECUTABLE_RE = /^[a-zA-Z0-9._-]+$/;
+const UNTRUSTED_BIN_PREFIXES = ['/tmp', '/var/tmp', '/dev/shm'];
 
 const PROVIDER_SPECS: ProviderSpec[] = [
   {
@@ -101,21 +111,42 @@ const PROVIDER_SPECS: ProviderSpec[] = [
   },
 ];
 
-function findBinary(binary: string): string | undefined {
+function isTrustedBinDir(dir: string): boolean {
+  if (!dir || !path.isAbsolute(dir) || dir.includes('..')) return false;
+  const normalized = path.resolve(dir);
+  for (const untrusted of UNTRUSTED_BIN_PREFIXES) {
+    if (normalized === untrusted || normalized.startsWith(`${untrusted}${path.sep}`)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getTrustedBinDirs(): string[] {
   const home = os.homedir();
-  const extraDirs = [
+  return [
     '/usr/local/bin',
     '/usr/bin',
+    '/bin',
     path.join(home, '.local', 'bin'),
     path.join(home, '.npm-global', 'bin'),
     path.join(home, '.bun', 'bin'),
   ];
+}
 
-  for (const dir of extraDirs) {
+function findBinary(binary: string): string | undefined {
+  if (!binary || binary.includes('/') || binary.includes('\\') || !BARE_EXECUTABLE_RE.test(binary)) {
+    return undefined;
+  }
+
+  for (const dir of getTrustedBinDirs()) {
     const candidate = path.join(dir, binary);
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
+      const real = fs.realpathSync(candidate);
+      if (isTrustedBinDir(path.dirname(real))) {
+        return real;
+      }
     } catch {
       // keep checking
     }
@@ -126,7 +157,12 @@ function findBinary(binary: string): string | undefined {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    if (resolved) return resolved;
+    if (resolved && isTrustedBinDir(path.dirname(resolved))) {
+      const real = fs.realpathSync(resolved);
+      if (isTrustedBinDir(path.dirname(real))) {
+        return real;
+      }
+    }
   } catch {
     // not found on PATH
   }
@@ -218,18 +254,33 @@ export function buildCliInvocation(
     }
 
     const rawExecutable = tokens[0];
-    const baseName = path.basename(rawExecutable).toLowerCase();
-
-    if (BLOCKED_SHELL_BINARIES.has(baseName)) {
+    if (rawExecutable.includes('/') || rawExecutable.includes('\\') || rawExecutable.includes('\0')) {
       throw new Error(
-        `Executável "${baseName}" bloqueado por segurança. Informe o binário do CLI diretamente (sem shell).`
+        `Caminho de executável não permitido ("${rawExecutable}"). Informe apenas o nome do binário sem separadores de diretório.`
+      );
+    }
+
+    if (
+      rawExecutable === '.' ||
+      rawExecutable === '..' ||
+      rawExecutable.startsWith('-') ||
+      !BARE_EXECUTABLE_RE.test(rawExecutable)
+    ) {
+      throw new Error(`Nome de executável inválido: "${rawExecutable}".`);
+    }
+
+    const normalizedName = rawExecutable.toLowerCase();
+
+    if (BLOCKED_SHELL_BINARIES.has(normalizedName)) {
+      throw new Error(
+        `Executável "${normalizedName}" bloqueado por segurança. Informe o binário do CLI diretamente (sem shell).`
       );
     }
 
     const allowAnyCustom = process.env.ENABLE_CUSTOM_CLI === '1';
-    if (!allowAnyCustom && !DEFAULT_CUSTOM_ALLOWLIST.has(baseName)) {
+    if (!allowAnyCustom && !DEFAULT_CUSTOM_ALLOWLIST.has(normalizedName)) {
       throw new Error(
-        `Executável "${baseName}" não está na lista permitida padrão (${Array.from(DEFAULT_CUSTOM_ALLOWLIST).join(', ')}). Defina ENABLE_CUSTOM_CLI=1 para liberar outros binários.`
+        `Executável "${normalizedName}" não está na lista permitida padrão (${Array.from(DEFAULT_CUSTOM_ALLOWLIST).join(', ')}). Defina ENABLE_CUSTOM_CLI=1 para liberar outros binários.`
       );
     }
 
@@ -246,7 +297,8 @@ export function buildCliInvocation(
       args.push(prompt);
     }
 
-    return { command: rawExecutable, args, shell: false };
+    const trustedResolved = findBinary(rawExecutable);
+    return { command: trustedResolved || rawExecutable, args, shell: false };
   }
 
   const bin = provider.resolvedPath || provider.binary;

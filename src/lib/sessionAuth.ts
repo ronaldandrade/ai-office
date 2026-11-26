@@ -1,18 +1,25 @@
-let cachedToken: string | null = null;
-let inflight: Promise<string | null> | null = null;
+let sessionReady = false;
+let inflight: Promise<boolean> | null = null;
 
-export async function getSessionToken(forceRefresh = false): Promise<string | null> {
-  if (cachedToken && !forceRefresh) return cachedToken;
+export async function ensureSession(forceRefresh = false): Promise<boolean> {
+  if (sessionReady && !forceRefresh) return true;
   if (inflight && !forceRefresh) return inflight;
 
-  inflight = fetch('/api/session', { credentials: 'same-origin' })
-    .then(async (res) => {
-      if (!res.ok) return null;
-      const data = (await res.json()) as { token?: string };
-      cachedToken = typeof data.token === 'string' ? data.token : null;
-      return cachedToken;
+  inflight = fetch('/api/session', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'X-Office-Bootstrap': '1',
+    },
+  })
+    .then((res) => {
+      sessionReady = res.ok;
+      return res.ok;
     })
-    .catch(() => null)
+    .catch(() => {
+      sessionReady = false;
+      return false;
+    })
     .finally(() => {
       inflight = null;
     });
@@ -20,8 +27,8 @@ export async function getSessionToken(forceRefresh = false): Promise<string | nu
   return inflight;
 }
 
-export function clearCachedSessionToken(): void {
-  cachedToken = null;
+export function clearCachedSession(): void {
+  sessionReady = false;
 }
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;

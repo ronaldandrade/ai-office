@@ -12,12 +12,13 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { getSessionToken, safeHexColor } from '../lib/sessionAuth.ts';
+import { ensureSession } from '../lib/sessionAuth.ts';
 import type {
   AgentRecord,
   AgentSummary,
   CliProviderInfo,
 } from '../types/office.ts';
+import { AgentAvatar } from './AgentAvatar.tsx';
 
 interface AgentDrawerProps {
   agent: AgentRecord | null;
@@ -60,16 +61,14 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
   const fetchSummary = useCallback(async (agentId: string) => {
     setLoadingSummary(true);
     try {
-      let token = await getSessionToken();
+      await ensureSession();
       let res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/summary`, {
         credentials: 'same-origin',
-        headers: token ? { 'X-Office-Token': token } : undefined,
       });
       if (res.status === 401) {
-        token = await getSessionToken(true);
+        await ensureSession(true);
         res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/summary`, {
           credentials: 'same-origin',
-          headers: token ? { 'X-Office-Token': token } : undefined,
         });
       }
       if (res.ok) {
@@ -130,13 +129,7 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
     <aside className="drawer">
       <div className="drawer-header">
         <div className="drawer-agent-info">
-          <div
-            className="agent-avatar-swatch large"
-            style={{ background: safeHexColor(agent.appearance.shirtColor) }}
-          >
-            <span>{agent.name.slice(0, 1).toUpperCase()}</span>
-            <span className={`status-dot ${agent.status}`} />
-          </div>
+          <AgentAvatar agent={agent} size="lg" showStatusDot />
           <div>
             <h3>{agent.name}</h3>
             <p className="drawer-role">{agent.roleTitle}</p>

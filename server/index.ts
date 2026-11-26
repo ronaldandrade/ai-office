@@ -9,9 +9,11 @@ import { AgentRunner } from './agentRunner.ts';
 import { detectProviders } from './cliRegistry.ts';
 import { MeetingManager } from './meetingManager.ts';
 import {
+  ALLOWED_HOSTS,
   ALLOWED_ORIGINS,
   extractRequestToken,
   initSessionToken,
+  isAllowedHost,
   isAllowedOrigin,
   isSameSiteBootstrapRequest,
   parseCreateAgentPayload,
@@ -22,6 +24,7 @@ import {
   sanitizeString,
   validateProviderId,
   validateWorkspacePath,
+  verifyWebSocketUpgrade,
 } from './security.ts';
 import {
   TerminalWatcher,
@@ -255,8 +258,17 @@ app.use((_req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; frame-ancestors 'none'"
+    "default-src 'self'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
   );
+  next();
+});
+
+// Strict Host validation against DNS rebinding
+app.use((req, res, next) => {
+  if (!isAllowedHost(req.headers.host)) {
+    res.status(403).json({ error: 'Host não permitido' });
+    return;
+  }
   next();
 });
 
@@ -280,6 +292,8 @@ app.use(
       callback(null, false);
     },
     credentials: true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Office-Token', 'X-Office-Bootstrap', 'Authorization'],
   })
 );
 
@@ -298,10 +312,17 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-// Local same-origin session bootstrap for the web UI
-app.get('/api/session', (req, res) => {
+// Reject GET session bootstrap; require POST with custom header & Host/Origin validation
+app.get('/api/session', (_req, res) => {
+  res.setHeader('Allow', 'POST');
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(405).json({ error: 'Método não permitido. Use POST /api/session.' });
+});
+
+// Local same-origin session bootstrap for the web UI (HttpOnly cookie only; never returns token in JSON)
+app.post('/api/session', (req, res) => {
   if (!isSameSiteBootstrapRequest(req)) {
-    res.status(403).json({ error: 'Origem não permitida' });
+    res.status(403).json({ error: 'Origem ou host não permitido' });
     return;
   }
   res.setHeader(
@@ -309,7 +330,7 @@ app.get('/api/session', (req, res) => {
     `office_token=${encodeURIComponent(SESSION_TOKEN)}; HttpOnly; SameSite=Strict; Path=/`
   );
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ token: SESSION_TOKEN });
+  res.json({ ok: true });
 });
 
 app.get('/api/state', requireAuth, (_req, res) => {
@@ -394,17 +415,16 @@ const wss = new WebSocketServer({
   path: '/ws',
   maxPayload: 64 * 1024,
   verifyClient: (info, done) => {
-    const originOk = isAllowedOrigin(info.origin);
-    if (!originOk) {
-      done(false, 403, 'Forbidden Origin');
-      return;
+    try {
+      const verdict = verifyWebSocketUpgrade(info, SESSION_TOKEN);
+      if (!verdict.ok) {
+        done(false, verdict.code, verdict.reason);
+        return;
+      }
+      done(true);
+    } catch {
+      done(false, 400, 'Bad Request');
     }
-    const token = extractRequestToken(info.req);
-    if (!safeCompareToken(token, SESSION_TOKEN)) {
-      done(false, 401, 'Unauthorized');
-      return;
-    }
-    done(true);
   },
 });
 
@@ -479,7 +499,8 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
       (a) => a.origin === 'terminal' && a.terminalPid === proc.pid
     );
 
-    const resolvedCwd = proc.cwd || agent?.cwd || defaultCwd;
+    const validProcCwd = proc.cwd ? validateWorkspacePath(proc.cwd, defaultCwd) : null;
+    const resolvedCwd = validProcCwd || agent?.cwd || defaultCwd;
 
     if (!agent) {
       const persona = PROVIDER_PERSONAS[proc.provider] || PROVIDER_PERSONAS.custom;
@@ -512,8 +533,8 @@ function syncTerminalAgents(detected: DetectedTerminalAgent[]): void {
 
     if (runner.isRunning(agent.id)) continue;
 
-    if (proc.cwd && agent.cwd !== proc.cwd) {
-      agent.cwd = proc.cwd;
+    if (validProcCwd && agent.cwd !== validProcCwd) {
+      agent.cwd = validProcCwd;
       const persona = PROVIDER_PERSONAS[proc.provider] || PROVIDER_PERSONAS.custom;
       agent.roleTitle = `${persona.roleTitle} • ${proc.projectName}`;
       structureChanged = true;
@@ -880,6 +901,7 @@ server.listen(PORT, HOST, () => {
     .map((p) => p.binary);
   console.log(`\n🏢 AI Office Server rodando em http://${HOST}:${PORT}`);
   console.log(`🔒 Origens permitidas: ${Array.from(ALLOWED_ORIGINS).join(', ')}`);
+  console.log(`🛡️ Hosts permitidos: ${Array.from(ALLOWED_HOSTS).join(', ')}`);
   console.log(`🔑 Token de sessão salvo em ${TOKEN_PATH} (permissão 0600)`);
   console.log(
     `🤖 CLIs detectados: ${installed.length > 0 ? installed.join(', ') : 'nenhum (modo demo ativo)'}`
