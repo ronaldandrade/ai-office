@@ -15,6 +15,69 @@ export const ALLOWED_ORIGINS = new Set(
     .filter(Boolean)
 );
 
+export const SESSION_BOOTSTRAP_HEADER = 'x-office-bootstrap';
+export const SESSION_BOOTSTRAP_VALUE = '1';
+
+function buildAllowedHosts(): Set<string> {
+  const hosts = new Set<string>();
+  for (const origin of ALLOWED_ORIGINS) {
+    try {
+      hosts.add(new URL(origin).host.toLowerCase());
+    } catch {
+      // ignore malformed origin entries
+    }
+  }
+
+  const port = Number(process.env.PORT || 3001);
+  if (Number.isInteger(port) && port > 0 && port <= 65535) {
+    hosts.add(`localhost:${port}`);
+    hosts.add(`127.0.0.1:${port}`);
+    if (port === 80 || port === 443) {
+      hosts.add('localhost');
+      hosts.add('127.0.0.1');
+    }
+    const configuredHost = process.env.HOST?.trim().toLowerCase();
+    if (configuredHost && !/[\s/@,]/.test(configuredHost)) {
+      hosts.add(`${configuredHost}:${port}`);
+    }
+  }
+
+  const extraHosts = process.env.ALLOWED_HOSTS;
+  if (extraHosts) {
+    for (const h of extraHosts.split(',')) {
+      const normalized = h.trim().toLowerCase();
+      if (normalized && !/[\s/@,]/.test(normalized)) {
+        hosts.add(normalized);
+      }
+    }
+  }
+
+  return hosts;
+}
+
+export const ALLOWED_HOSTS = buildAllowedHosts();
+
+const BLOCKED_SENSITIVE_HOME_DIRS = [
+  '.ssh',
+  '.aws',
+  '.gnupg',
+  '.gpg',
+  '.kube',
+  '.docker',
+  path.join('.config', 'gcloud'),
+  path.join('.config', 'gh'),
+  '.azure',
+  '.pki',
+  '.password-store',
+  path.join('.local', 'share', 'keyrings'),
+  '.mozilla',
+  path.join('.config', 'google-chrome'),
+  path.join('.config', 'chromium'),
+  '.gemini',
+  '.claude',
+  '.codex',
+];
+
 const VALID_PROVIDERS = new Set<ProviderId>([
   'claude',
   'gemini',
@@ -62,7 +125,11 @@ export function parseCookie(header: string | undefined, name: string): string | 
     if (idx === -1) continue;
     const k = part.slice(0, idx).trim();
     if (k === name) {
-      return decodeURIComponent(part.slice(idx + 1).trim());
+      try {
+        return decodeURIComponent(part.slice(idx + 1).trim());
+      } catch {
+        return undefined;
+      }
     }
   }
   return undefined;
@@ -80,47 +147,118 @@ export function extractRequestToken(req: IncomingMessage): string | undefined {
   const cookieToken = parseCookie(req.headers.cookie, 'office_token');
   if (cookieToken) return cookieToken;
 
-  if (req.url) {
-    try {
-      const parsed = new URL(req.url, 'http://127.0.0.1');
-      const queryToken = parsed.searchParams.get('token');
-      if (queryToken) return queryToken;
-    } catch {
-      // ignore malformed URL
-    }
-  }
   return undefined;
 }
 
-export function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return false;
-  return ALLOWED_ORIGINS.has(origin);
+export function extractWebSocketToken(req: IncomingMessage): string | undefined {
+  if (req.url) {
+    try {
+      const parsed = new URL(req.url, 'http://127.0.0.1');
+      if (parsed.searchParams.has('token')) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return parseCookie(req.headers.cookie, 'office_token');
 }
 
-export function isSameSiteBootstrapRequest(req: IncomingMessage): boolean {
+export function isAllowedHost(
+  host: string | undefined,
+  allowedHosts: ReadonlySet<string> = ALLOWED_HOSTS
+): boolean {
+  if (!host || typeof host !== 'string') return false;
+  const normalized = host.trim().toLowerCase();
+  if (!normalized || /[\s/@,]/.test(normalized)) return false;
+  return allowedHosts.has(normalized);
+}
+
+export function isAllowedOrigin(
+  origin: string | undefined,
+  allowedOrigins: ReadonlySet<string> = ALLOWED_ORIGINS
+): boolean {
+  if (!origin) return false;
+  return allowedOrigins.has(origin);
+}
+
+export interface BootstrapCheckOptions {
+  allowedHosts?: ReadonlySet<string>;
+  allowedOrigins?: ReadonlySet<string>;
+}
+
+export function isSameSiteBootstrapRequest(
+  req: IncomingMessage,
+  options?: BootstrapCheckOptions
+): boolean {
+  const allowedHosts = options?.allowedHosts ?? ALLOWED_HOSTS;
+  const allowedOrigins = options?.allowedOrigins ?? ALLOWED_ORIGINS;
+
+  if (!isAllowedHost(req.headers.host, allowedHosts)) {
+    return false;
+  }
+
+  const bootstrapHeader = req.headers[SESSION_BOOTSTRAP_HEADER];
+  if (bootstrapHeader !== SESSION_BOOTSTRAP_VALUE) {
+    return false;
+  }
+
   const secFetchSite = req.headers['sec-fetch-site'];
-  if (typeof secFetchSite === 'string' && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+  if (secFetchSite !== undefined && secFetchSite !== 'same-origin') {
     return false;
   }
+
   const origin = req.headers.origin;
-  if (origin && !isAllowedOrigin(origin)) {
+  if (origin !== undefined) {
+    if (typeof origin !== 'string' || !isAllowedOrigin(origin, allowedOrigins)) {
+      return false;
+    }
+  } else if (secFetchSite === 'same-origin') {
     return false;
   }
+
   const referer = req.headers.referer;
-  if (referer) {
+  if (referer !== undefined) {
+    if (typeof referer !== 'string') return false;
     try {
       const refOrigin = new URL(referer).origin;
-      if (!isAllowedOrigin(refOrigin)) return false;
+      if (!isAllowedOrigin(refOrigin, allowedOrigins)) return false;
     } catch {
       return false;
     }
   }
+
   return true;
+}
+
+export function verifyWebSocketUpgrade(
+  info: { origin?: string; req: IncomingMessage },
+  expectedToken: string,
+  options?: BootstrapCheckOptions
+): { ok: true } | { ok: false; code: number; reason: string } {
+  try {
+    const allowedHosts = options?.allowedHosts ?? ALLOWED_HOSTS;
+    const allowedOrigins = options?.allowedOrigins ?? ALLOWED_ORIGINS;
+
+    if (!isAllowedHost(info.req.headers.host, allowedHosts)) {
+      return { ok: false, code: 403, reason: 'Forbidden Host' };
+    }
+    if (!isAllowedOrigin(info.origin, allowedOrigins)) {
+      return { ok: false, code: 403, reason: 'Forbidden Origin' };
+    }
+    const token = extractWebSocketToken(info.req);
+    if (!safeCompareToken(token, expectedToken)) {
+      return { ok: false, code: 401, reason: 'Unauthorized' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, code: 400, reason: 'Bad Request' };
+  }
 }
 
 export function sanitizeString(value: unknown, maxLen: number, fallback = ''): string {
   if (typeof value !== 'string') return fallback;
-  return value.trim().slice(0, maxLen);
+  return value.replaceAll('\0', '').trim().slice(0, maxLen);
 }
 
 export function sanitizeHexColor(value: unknown, fallback: string): string {
@@ -165,9 +303,37 @@ export function sanitizeAppearance(
   };
 }
 
+function getRealHomeDir(homeDir = os.homedir()): string {
+  try {
+    return fs.realpathSync(homeDir);
+  } catch {
+    return path.resolve(homeDir);
+  }
+}
+
+export function isSensitiveWorkspacePath(resolvedPath: string, homeDir = os.homedir()): boolean {
+  const realHome = getRealHomeDir(homeDir);
+  for (const rel of BLOCKED_SENSITIVE_HOME_DIRS) {
+    const blockedTarget = path.join(realHome, rel);
+    if (isPathInsideRoot(resolvedPath, blockedTarget)) {
+      return true;
+    }
+    try {
+      const realBlocked = fs.realpathSync(blockedTarget);
+      if (realBlocked !== blockedTarget && isPathInsideRoot(resolvedPath, realBlocked)) {
+        return true;
+      }
+    } catch {
+      // blocked directory may not exist yet; logical path check above still applies
+    }
+  }
+  return false;
+}
+
 function getAllowedRoots(): string[] {
   const raw = process.env.ALLOWED_WORKSPACES;
-  const candidates = raw
+  const hasExplicitConfig = typeof raw === 'string' && raw.trim().length > 0;
+  const candidates = hasExplicitConfig
     ? raw.split(',').map((s) => s.trim()).filter(Boolean)
     : [os.homedir()];
 
@@ -179,7 +345,12 @@ function getAllowedRoots(): string[] {
       // ignore non-existent roots
     }
   }
-  return roots.length > 0 ? roots : [os.homedir()];
+
+  // Fail closed when ALLOWED_WORKSPACES is explicitly configured but resolves to no valid directories
+  if (hasExplicitConfig) {
+    return roots;
+  }
+  return roots.length > 0 ? roots : [getRealHomeDir()];
 }
 
 export function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
@@ -187,26 +358,33 @@ export function isPathInsideRoot(targetPath: string, rootPath: string): boolean 
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-export function validateWorkspacePath(inputPath: unknown, fallback: string): string | null {
-  if (typeof inputPath !== 'string' || !inputPath.trim()) {
-    return fallback;
-  }
-  const trimmed = inputPath.trim();
-  if (trimmed.length > 512 || trimmed.includes('\0')) return null;
+function validateConcreteWorkspacePath(trimmed: string): string | null {
+  if (!trimmed || trimmed.length > 512 || trimmed.includes('\0')) return null;
 
   try {
     const resolved = fs.realpathSync(trimmed);
     const st = fs.statSync(resolved);
     if (!st.isDirectory()) return null;
 
+    if (isSensitiveWorkspacePath(resolved)) {
+      return null;
+    }
+
     const roots = getAllowedRoots();
-    if (!roots.some((root) => isPathInsideRoot(resolved, root))) {
+    if (roots.length === 0 || !roots.some((root) => isPathInsideRoot(resolved, root))) {
       return null;
     }
     return resolved;
   } catch {
     return null;
   }
+}
+
+export function validateWorkspacePath(inputPath: unknown, fallback: string): string | null {
+  if (typeof inputPath !== 'string' || !inputPath.trim()) {
+    return validateConcreteWorkspacePath(fallback.trim());
+  }
+  return validateConcreteWorkspacePath(inputPath.trim());
 }
 
 export interface ValidatedCreateAgent {

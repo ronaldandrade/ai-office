@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
+import path from 'node:path';
 import { buildCliInvocation } from './cliRegistry.ts';
+import { validateWorkspacePath } from './security.ts';
 import type { AgentRecord, CliProviderInfo } from './types.ts';
 
 const MAX_CONCURRENT_TASKS = 4;
@@ -55,35 +56,173 @@ function killProcessTree(proc: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
-function buildSafeEnv(providerId: CliProviderInfo['id']): NodeJS.ProcessEnv {
-  if (providerId === 'custom') {
-    const allowKeys = [
-      'PATH',
-      'HOME',
-      'USER',
-      'LANG',
-      'LC_ALL',
-      'TERM',
-      'OLLAMA_HOST',
-      'TMPDIR',
-    ];
-    const filtered: NodeJS.ProcessEnv = {
-      FORCE_COLOR: '0',
-      NO_COLOR: '1',
-    };
-    for (const k of allowKeys) {
-      if (process.env[k] !== undefined) filtered[k] = process.env[k];
-    }
-    return filtered;
-  }
+const COMMON_SAFE_ENV_KEYS = new Set([
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LANGUAGE',
+  'TZ',
+  'TERM',
+  'COLORTERM',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_STATE_HOME',
+  'XDG_RUNTIME_DIR',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS',
+  'EDITOR',
+  'VISUAL',
+]);
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+const ALWAYS_BLOCKED_ENV_KEYS = new Set([
+  'OFFICE_AUTH_TOKEN',
+  'ANTIGRAVITY_CSRF_TOKEN',
+  'ALLOWED_ORIGINS',
+  'ALLOWED_HOSTS',
+  'ALLOWED_WORKSPACES',
+  'ENABLE_CUSTOM_CLI',
+  'AGENT_PASS_ENV',
+  'NODE_OPTIONS',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+]);
+
+const PROVIDER_ENV_RULES: Record<
+  CliProviderInfo['id'],
+  { exact: ReadonlySet<string>; prefixes: readonly string[] }
+> = {
+  claude: {
+    exact: new Set([
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_MODEL',
+      'CLAUDE_CONFIG_DIR',
+    ]),
+    prefixes: ['ANTHROPIC_', 'CLAUDE_'],
+  },
+  gemini: {
+    exact: new Set([
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'GOOGLE_CLOUD_PROJECT',
+      'GOOGLE_CLOUD_LOCATION',
+      'GOOGLE_GENAI_USE_VERTEXAI',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+    ]),
+    prefixes: ['GEMINI_'],
+  },
+  agy: {
+    exact: new Set([
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'GOOGLE_CLOUD_PROJECT',
+      'GOOGLE_CLOUD_LOCATION',
+      'GOOGLE_GENAI_USE_VERTEXAI',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+    ]),
+    prefixes: ['AGY_', 'ANTIGRAVITY_', 'GEMINI_'],
+  },
+  codex: {
+    exact: new Set(['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT']),
+    prefixes: ['OPENAI_', 'CODEX_'],
+  },
+  aider: {
+    exact: new Set([
+      'OPENAI_API_KEY',
+      'OPENAI_API_BASE',
+      'ANTHROPIC_API_KEY',
+      'GEMINI_API_KEY',
+      'OPENROUTER_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'OLLAMA_API_BASE',
+      'OLLAMA_HOST',
+    ]),
+    prefixes: ['AIDER_'],
+  },
+  custom: {
+    exact: new Set(['OLLAMA_HOST', 'OLLAMA_MODELS', 'LLM_USER_PATH']),
+    prefixes: [],
+  },
+  demo: {
+    exact: new Set(),
+    prefixes: [],
+  },
+};
+
+const UNTRUSTED_PATH_PREFIXES = ['/tmp', '/var/tmp', '/dev/shm'];
+
+export function sanitizePathEnv(rawPath: string | undefined): string | undefined {
+  if (!rawPath) return undefined;
+  const safeSegments = rawPath
+    .split(path.delimiter)
+    .map((s) => s.trim())
+    .filter((seg) => {
+      if (!seg || !path.isAbsolute(seg) || seg.includes('..')) return false;
+      const resolved = path.resolve(seg);
+      return !UNTRUSTED_PATH_PREFIXES.some(
+        (prefix) => resolved === prefix || resolved.startsWith(`${prefix}${path.sep}`)
+      );
+    });
+  return safeSegments.length > 0 ? safeSegments.join(path.delimiter) : undefined;
+}
+
+export function buildSafeEnv(
+  providerId: CliProviderInfo['id'],
+  sourceEnv: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const rules = PROVIDER_ENV_RULES[providerId] ?? PROVIDER_ENV_RULES.custom;
+  const extraAllowed = new Set(
+    (sourceEnv.AGENT_PASS_ENV || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+
+  const filtered: NodeJS.ProcessEnv = {
     FORCE_COLOR: '0',
     NO_COLOR: '1',
   };
-  delete env.OFFICE_AUTH_TOKEN;
-  return env;
+
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (value === undefined) continue;
+    if (ALWAYS_BLOCKED_ENV_KEYS.has(key)) continue;
+
+    const allowed =
+      COMMON_SAFE_ENV_KEYS.has(key) ||
+      rules.exact.has(key) ||
+      rules.prefixes.some((prefix) => key.startsWith(prefix)) ||
+      extraAllowed.has(key);
+
+    if (!allowed) continue;
+
+    if (key === 'PATH') {
+      const safePath = sanitizePathEnv(value);
+      if (safePath) filtered.PATH = safePath;
+    } else {
+      filtered[key] = value;
+    }
+  }
+
+  return filtered;
 }
 
 export class AgentRunner {
@@ -146,13 +285,9 @@ export class AgentRunner {
       return;
     }
 
-    let safeCwd = process.cwd();
-    try {
-      if (fs.statSync(cwd).isDirectory()) {
-        safeCwd = cwd;
-      }
-    } catch {
-      callbacks.onChunk(`\n[Erro]: diretório de trabalho inválido: ${cwd}\n`);
+    const safeCwd = validateWorkspacePath(cwd, '');
+    if (!safeCwd) {
+      callbacks.onChunk(`\n[Erro]: diretório de trabalho inválido ou não permitido: ${cwd}\n`);
       callbacks.onDone('error');
       return;
     }

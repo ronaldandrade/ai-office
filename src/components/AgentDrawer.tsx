@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { getSessionToken, safeHexColor } from '../lib/sessionAuth.ts';
+import { ensureSession, safeHexColor } from '../lib/sessionAuth.ts';
 import type {
   AgentRecord,
   AgentSummary,
@@ -60,16 +60,14 @@ export const AgentDrawer: React.FC<AgentDrawerProps> = ({
   const fetchSummary = useCallback(async (agentId: string) => {
     setLoadingSummary(true);
     try {
-      let token = await getSessionToken();
+      await ensureSession();
       let res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/summary`, {
         credentials: 'same-origin',
-        headers: token ? { 'X-Office-Token': token } : undefined,
       });
       if (res.status === 401) {
-        token = await getSessionToken(true);
+        await ensureSession(true);
         res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/summary`, {
           credentials: 'same-origin',
-          headers: token ? { 'X-Office-Token': token } : undefined,
         });
       }
       if (res.ok) {
